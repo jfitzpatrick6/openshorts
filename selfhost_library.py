@@ -22,6 +22,35 @@ _TITLE_KEYS = (
 )
 
 
+def clip_scores(clips) -> list:
+    """One virality score per clip, in clip order.
+
+    A clip with no numeric ``predicted_score`` is ``None``, so the list stays
+    aligned with clip 1, clip 2, and so on. Booleans are not scores.
+    """
+    scores = []
+    if not isinstance(clips, list):
+        return scores
+    for clip in clips:
+        scores.append(_one_score(clip))
+    return scores
+
+
+def _one_score(clip) -> int | None:
+    if not isinstance(clip, dict):
+        return None
+    raw = clip.get("predicted_score")
+    if isinstance(raw, bool) or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        score = int(round(float(raw)))
+    except (TypeError, ValueError):
+        return None
+    return score
+
+
 def clip_title(clip: dict) -> str:
     """The shortest human title a clip record carries, or ''."""
     if not isinstance(clip, dict):
@@ -66,6 +95,7 @@ def summarize_job(job_id: str, record: dict, output_dir: str, updated_at: float 
         "title": title or source or job_id[:8],
         "source": source,
         "clip_count": len(clips),
+        "scores": clip_scores(clips),
         "log": last[:240],
         "updated_at": updated_at,
     }

@@ -5,7 +5,8 @@ import pytest
 
 from local_media import LocalMediaError
 from selfhost_library import (
-    list_retained, retained_file, served_landscape_name, sort_jobs, summarize_job,
+    clip_scores, list_retained, retained_file, served_landscape_name, sort_jobs,
+    summarize_job,
 )
 
 
@@ -26,6 +27,23 @@ def test_summary_prefers_a_clip_title_and_the_last_log(tmp_path):
     assert row["clip_count"] == 1
     assert row["log"] == "done"
     assert row["status"] == "completed"
+    assert row["scores"] == [None]
+
+
+def test_summary_keeps_virality_scores_aligned_with_clips(tmp_path):
+    row = summarize_job("abc12345-rest", {
+        "status": "completed",
+        "result": {"clips": [
+            {"predicted_score": 84, "video_title_for_youtube_short": "First"},
+            {"predicted_score": 71.6},
+            {},
+            {"predicted_score": "nope"},
+            {"predicted_score": "79"},
+            {"predicted_score": True},
+        ]},
+    }, str(tmp_path), 1.0)
+    assert row["scores"] == [84, 72, None, None, 79, None]
+    assert clip_scores("nope") == []
 
 
 def test_working_jobs_sort_ahead_of_newer_finished_ones():

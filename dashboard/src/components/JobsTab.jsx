@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Film, FolderOpen, Loader2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { getApiUrl } from '../config';
@@ -25,11 +25,47 @@ function statusBadge(status) {
   return 'badge-warn';
 }
 
+function scoreTone(score) {
+  if (score >= 80) return 'text-ok';
+  if (score >= 65) return 'text-brass';
+  return 'text-ink2';
+}
+
+// One number per clip, in clip order. A missing score stays null so clip 3
+// is still index 2 when an earlier clip had none.
+function scoresFromClips(clips) {
+  if (!Array.isArray(clips)) return [];
+  return clips.map((clip) => {
+    const raw = clip?.predicted_score;
+    if (raw === null || raw === undefined || raw === '') return null;
+    const score = Number(raw);
+    return Number.isFinite(score) ? Math.round(score) : null;
+  });
+}
+
+function finiteScores(scores) {
+  return (scores || []).filter((score) => Number.isFinite(score));
+}
+
+function sourceKey(source) {
+  return String(source || '').replace(/\.mp4$/i, '');
+}
+
+function clipNumber(clip) {
+  const match = /^clip (\d+)/.exec(clip?.label || '');
+  return match ? Number(match[1]) : null;
+}
+
 export default function JobsTab({ onOpenJob }) {
   const [jobs, setJobs] = useState(null);
   const [kept, setKept] = useState(null);
   const [error, setError] = useState('');
   const [opening, setOpening] = useState('');
+  // Scores the running API process does not put on /api/jobs yet. Filled once
+  // per finished job from the result it already stores. A poll must not refetch.
+  const scoreCache = useRef({});
+  const [scoreTick, setScoreTick] = useState(0);
+  const mounted = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,9 +85,30 @@ export default function JobsTab({ onOpenJob }) {
     const timer = setInterval(load, 5000);
     return () => {
       cancelled = true;
+      mounted.current = false;
       clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (!jobs) return;
+    for (const job of jobs) {
+      if (Array.isArray(job.scores)) continue;
+      if (!job.clip_count || WORKING.has(job.status)) continue;
+      if (scoreCache.current[job.job_id]) continue;
+      scoreCache.current[job.job_id] = 'loading';
+      apiJson(`/api/status/${job.job_id}`)
+        .then((body) => {
+          scoreCache.current[job.job_id] = scoresFromClips(body?.result?.clips);
+        })
+        .catch(() => {
+          scoreCache.current[job.job_id] = [];
+        })
+        .finally(() => {
+          if (mounted.current) setScoreTick((tick) => tick + 1);
+        });
+    }
+  }, [jobs]);
 
   const open = async (jobId) => {
     if (!onOpenJob || opening) return;
@@ -68,6 +125,22 @@ export default function JobsTab({ onOpenJob }) {
   const working = rows.filter((job) => WORKING.has(job.status));
   const finished = rows.filter((job) => !WORKING.has(job.status));
   const episodes = kept?.episodes || [];
+
+  const scoresFor = (job) => {
+    if (Array.isArray(job?.scores)) return job.scores;
+    const cached = scoreCache.current[job?.job_id];
+    return Array.isArray(cached) ? cached : [];
+  };
+  // scoreTick changes when a fill-in lands in scoreCache. The cache itself
+  // is a ref, so the memo would otherwise keep the empty lists.
+  const scoresByEpisode = useMemo(() => {
+    const map = new Map();
+    for (const job of rows) {
+      const key = sourceKey(job.source);
+      if (key) map.set(key, scoresFor(job));
+    }
+    return map;
+  }, [rows, scoreTick]);
 
   if (jobs === null && kept === null && !error) {
     return <div className="flex justify-center py-20"><Loader2 className="animate-spin text-brass" /></div>;
@@ -90,7 +163,7 @@ export default function JobsTab({ onOpenJob }) {
         )}
         <div className="space-y-3">
           {working.map((job) => (
-            <JobRow key={job.job_id} job={job} opening={opening} onOpen={open} />
+            <JobRow key={job.job_id} job={job} scores={scoresFor(job)} opening={opening} onOpen={open} />
           ))}
         </div>
       </section>
@@ -102,7 +175,7 @@ export default function JobsTab({ onOpenJob }) {
         )}
         <div className="space-y-3">
           {finished.map((job) => (
-            <JobRow key={job.job_id} job={job} opening={opening} onOpen={open} />
+            <JobRow key={job.job_id} job={job} scores={scoresFor(job)} opening={opening} onOpen={open} />
           ))}
         </div>
       </section>
@@ -130,28 +203,42 @@ export default function JobsTab({ onOpenJob }) {
                 </p>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-                {episode.clips.map((clip) => (
-                  <div key={clip.url} className="card overflow-hidden">
-                    <div className={`${clip.shape === '16:9' ? 'aspect-video' : 'aspect-[9/16]'} bg-black`}>
-                      <video
-                        src={getApiUrl(clip.url)}
-                        controls
-                        preload="metadata"
-                        className="w-full h-full object-contain"
-                      />
+                {episode.clips.map((clip) => {
+                  const number = clipNumber(clip);
+                  const episodeScores = scoresByEpisode.get(episode.name) || [];
+                  const score = number ? episodeScores[number - 1] : null;
+                  return (
+                    <div key={clip.url} className="card overflow-hidden">
+                      <div className={`relative ${clip.shape === '16:9' ? 'aspect-video' : 'aspect-[9/16]'} bg-black`}>
+                        <video
+                          src={getApiUrl(clip.url)}
+                          controls
+                          preload="metadata"
+                          className="w-full h-full object-contain"
+                        />
+                        {Number.isFinite(score) && (
+                          <span
+                            className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full"
+                            title="Virality score, from 0 to 100"
+                          >
+                            <span className="text-white/70">viral </span>
+                            <b className={scoreTone(score)}>{score}</b>
+                          </span>
+                        )}
+                      </div>
+                      <div className="p-3">
+                        <p className="text-sm text-ink font-medium lowercase">{clip.label}</p>
+                        <p className="readout mt-0.5">
+                          {fmtSize(clip.bytes)}
+                          {typeof clip.days_left === 'number' ? ` · ${clip.days_left}d left` : ''}
+                        </p>
+                        <a href={getApiUrl(clip.url)} download className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block">
+                          download
+                        </a>
+                      </div>
                     </div>
-                    <div className="p-3">
-                      <p className="text-sm text-ink font-medium lowercase">{clip.label}</p>
-                      <p className="readout mt-0.5">
-                        {fmtSize(clip.bytes)}
-                        {typeof clip.days_left === 'number' ? ` · ${clip.days_left}d left` : ''}
-                      </p>
-                      <a href={getApiUrl(clip.url)} download className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block">
-                        download
-                      </a>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -161,7 +248,8 @@ export default function JobsTab({ onOpenJob }) {
   );
 }
 
-function JobRow({ job, opening, onOpen }) {
+function JobRow({ job, scores, opening, onOpen }) {
+  const shown = finiteScores(scores);
   return (
     <div className="card p-4 flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
@@ -169,6 +257,14 @@ function JobRow({ job, opening, onOpen }) {
         <p className="readout mt-1 flex flex-wrap items-center gap-2">
           <span className={`${statusBadge(job.status)} px-1.5 py-0.5 rounded-full`}>{job.status}</span>
           <span>{job.clip_count} clip{job.clip_count === 1 ? '' : 's'}</span>
+          {shown.length > 0 && (
+            <span title="Virality scores in clip order, from 0 to 100">
+              viral{' '}
+              {shown.map((score, index) => (
+                <b key={`${index}-${score}`} className={`${scoreTone(score)} ${index ? 'ml-1' : ''}`}>{score}</b>
+              ))}
+            </span>
+          )}
           {job.updated_at ? <span>{fmtWhen(job.updated_at)}</span> : null}
         </p>
         {job.log && <p className="text-muted text-xs mt-1 line-clamp-2">{job.log}</p>}

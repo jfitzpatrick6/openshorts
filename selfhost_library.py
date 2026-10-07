@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from local_media import LocalMediaError, resolve_local_media
 
-_CLIP_NUM = re.compile(r"_clip_(\d+)\.mp4$", re.IGNORECASE)
+_CLIP_NUM = re.compile(r"_clip_(\d+)(_16x9)?\.mp4$", re.IGNORECASE)
 _TITLE_KEYS = (
     "video_title_for_youtube_short",
     "title",
@@ -81,11 +81,33 @@ def sort_jobs(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=key)
 
 
+def served_landscape_name(clip: dict) -> str:
+    """Basename recorded for the 16:9 twin, or '' when it is not a plain mp4 name."""
+    if not isinstance(clip, dict):
+        return ""
+    raw = clip.get("landscape_file")
+    if not isinstance(raw, str):
+        return ""
+    name = raw.strip()
+    if not name or name != os.path.basename(name) or name.startswith("."):
+        return ""
+    if not name.lower().endswith(".mp4"):
+        return ""
+    return name
+
+
+def _clip_shape(filename: str) -> str:
+    match = _CLIP_NUM.search(filename)
+    if not match:
+        return ""
+    return "16:9" if match.group(2) else "9:16"
+
+
 def _clip_label(filename: str) -> str:
     match = _CLIP_NUM.search(filename)
-    if match:
-        return f"clip {int(match.group(1))}"
-    return filename
+    if not match:
+        return filename
+    return f"clip {int(match.group(1))} · {_clip_shape(filename)}"
 
 
 def _inside_dir(root_real: str, path: str) -> bool:
@@ -138,17 +160,21 @@ def list_retained(root: str, days: int, now: float) -> dict:
             except OSError:
                 continue
             age_days = int(max(0, now - st.st_mtime) // 86400)
-            clips.append({
+            item = {
                 "name": filename,
                 "label": _clip_label(filename),
                 "bytes": st.st_size,
                 "mtime": st.st_mtime,
                 "days_left": max(0, days - age_days),
                 "url": "/api/retained/" + quote(name, safe="") + "/" + quote(filename, safe=""),
-            })
+            }
+            shape = _clip_shape(filename)
+            if shape:
+                item["shape"] = shape
+            clips.append(item)
         if not clips:
             continue
-        clips.sort(key=lambda item: (_clip_sort(item["name"]), item["name"]))
+        clips.sort(key=lambda item: _clip_sort(item["name"]))
         episodes.append({
             "name": name,
             "updated_at": max(item["mtime"] for item in clips),
@@ -159,9 +185,13 @@ def list_retained(root: str, days: int, now: float) -> dict:
     return payload
 
 
-def _clip_sort(filename: str) -> int:
+def _clip_sort(filename: str) -> tuple:
+    """Vertical before the 16:9 of the same moment, then by filename."""
     match = _CLIP_NUM.search(filename)
-    return int(match.group(1)) if match else 10**9
+    if not match:
+        return (10**9, 1, filename)
+    wide = 1 if match.group(2) else 0
+    return (int(match.group(1)), wide, filename)
 
 
 def retained_file(root: str, episode: str, filename: str) -> str:

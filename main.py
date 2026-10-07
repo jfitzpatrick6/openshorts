@@ -1351,6 +1351,44 @@ def auto_hook_clip(clip_path, clip, captions=None):
         return None
 
 
+def also_landscape(output_format):
+    """True when this job should also keep a native 16:9 of each clip.
+
+    The primary render stays whatever ``--format`` asked for. A job that is
+    already horizontal does not need a second copy of the same frames.
+    """
+    flag = os.environ.get("ALSO_LANDSCAPE", "").strip().lower()
+    if flag not in ("1", "true", "yes"):
+        return False
+    return output_format != "horizontal"
+
+
+def write_landscape_copy(clip_temp_path, clip_final_path, transcript, start, end, clip):
+    """Captioned 16:9 beside the vertical clip, taken from the native cut.
+
+    The cut is the source frame. Copy it before the caller deletes that temp.
+    Captions get an empty seam list so they do not sit on the vertical split.
+    A failure here leaves the vertical clip as the only file.
+    """
+    wide_path = os.path.splitext(clip_final_path)[0] + "_16x9.mp4"
+    try:
+        if not finalize_clip_passthrough(clip_temp_path, wide_path):
+            return
+        served = wide_path
+        captioned = auto_caption_clip(
+            wide_path, transcript, start, end, split_ranges=[])
+        if captioned:
+            served = captioned
+        if os.environ.get("WATERMARK") == "1":
+            served = mark_delivery(served)
+        if served and os.path.getsize(served) > 0:
+            clip["landscape_file"] = os.path.basename(served)
+            print(f"   🖼️ Landscape copy: {clip['landscape_file']}")
+    except Exception as e:
+        print(f"   ⚠️ Landscape copy failed ({type(e).__name__}: {e}) — "
+              f"the vertical clip still ships.")
+
+
 def render_clip(input_video, final_output_video, output_format="auto",
                 force_strategy=None, crop_overrides=None, watermark=False):
     """Route a cut clip through the right renderer for the chosen output format.
@@ -2518,6 +2556,12 @@ if __name__ == '__main__':
                     success = render_clip(clip_temp_path, clip_final_path, output_format)
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
+                        # The temp cut is still the native frame. The finally
+                        # below deletes it, so the 16:9 copy has to happen now.
+                        if also_landscape(output_format):
+                            write_landscape_copy(
+                                clip_temp_path, clip_final_path, transcript,
+                                start, end, clip)
                     deliver_path = clip_final_path
                     # Which stretches were stacked (SPLIT): captions go on the
                     # seam there, and /api/subtitle needs it again later.
@@ -2606,7 +2650,8 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook)
             # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c for c in shorts):
+            if any('auto_hook' in c or 'hook_grounding' in c or c.get('landscape_file')
+                   for c in shorts):
                 with open(metadata_file, 'w') as f:
                     json.dump(clips_data, f, indent=2)
 

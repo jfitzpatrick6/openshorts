@@ -4,7 +4,9 @@ import os
 import pytest
 
 from local_media import LocalMediaError
-from selfhost_library import list_retained, retained_file, sort_jobs, summarize_job
+from selfhost_library import (
+    list_retained, retained_file, served_landscape_name, sort_jobs, summarize_job,
+)
 
 
 def test_summary_prefers_a_clip_title_and_the_last_log(tmp_path):
@@ -60,10 +62,37 @@ def test_retained_list_orders_episodes_and_skips_an_escape(tmp_path):
     newer_clips = payload["episodes"][0]["clips"]
     assert [clip["name"] for clip in newer_clips] == ["show_clip_1.mp4"]
     older_clips = payload["episodes"][1]["clips"]
-    assert [clip["label"] for clip in older_clips] == ["clip 1", "clip 2"]
+    assert [clip["label"] for clip in older_clips] == ["clip 1 · 9:16", "clip 2 · 9:16"]
+    assert [clip["shape"] for clip in older_clips] == ["9:16", "9:16"]
     assert older_clips[0]["days_left"] == 28
     assert " " not in newer_clips[0]["url"]
     assert newer_clips[0]["url"].startswith("/api/retained/")
+
+
+def test_landscape_twins_sort_after_the_vertical_of_the_same_moment(tmp_path):
+    root = tmp_path / "inbox"
+    show = root / "show"
+    show.mkdir(parents=True)
+    (show / "show_clip_1_16x9.mp4").write_bytes(b"w")
+    (show / "subtitled_9_show_clip_1.mp4").write_bytes(b"v")
+    (show / "subtitled_9_show_clip_2_16x9.mp4").write_bytes(b"ww")
+    payload = list_retained(str(root), 30, now=0)
+    clips = payload["episodes"][0]["clips"]
+    assert [clip["label"] for clip in clips] == [
+        "clip 1 · 9:16",
+        "clip 1 · 16:9",
+        "clip 2 · 16:9",
+    ]
+    assert [clip["shape"] for clip in clips] == ["9:16", "16:9", "16:9"]
+
+
+def test_landscape_name_rejects_a_path():
+    assert served_landscape_name({"landscape_file": "subtitled_1_ep_clip_1_16x9.mp4"}) == (
+        "subtitled_1_ep_clip_1_16x9.mp4"
+    )
+    assert served_landscape_name({"landscape_file": "../secret.mp4"}) == ""
+    assert served_landscape_name({"landscape_file": ".hidden.mp4"}) == ""
+    assert served_landscape_name({}) == ""
 
 
 def test_empty_root_disables_the_list(tmp_path):

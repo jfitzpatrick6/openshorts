@@ -132,7 +132,7 @@ export default function JobsTab({ onOpenJob }) {
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                 {episode.clips.map((clip) => (
                   <div key={clip.url} className="card overflow-hidden">
-                    <div className="aspect-[9/16] bg-black">
+                    <div className={`${clip.shape === '16:9' ? 'aspect-video' : 'aspect-[9/16]'} bg-black`}>
                       <video
                         src={getApiUrl(clip.url)}
                         controls

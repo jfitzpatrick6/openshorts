@@ -765,8 +765,23 @@ def _clips_actually_rendered(job_id, output_dir, base_name, clips):
                   f"({clip_filename}) — dropping it from the result.")
             continue
         clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+        _attach_landscape_url(job_id, output_dir, clip)
         kept.append(clip)
     return kept, len(clips) - len(kept)
+
+
+def _attach_landscape_url(job_id, output_dir, clip):
+    """Point landscape_url at the 16:9 file when that file is on disk."""
+    name = selfhost_library.served_landscape_name(clip)
+    if not name:
+        return
+    path = os.path.join(output_dir, name)
+    try:
+        present = os.path.getsize(path) > 0
+    except OSError:
+        present = False
+    if present:
+        clip["landscape_url"] = f"/videos/{job_id}/{name}"
 
 
 def _strip_watermark_copy(output_dir, filename):
@@ -1068,6 +1083,7 @@ def _recover_jobs_from_disk():
                     clip['video_url'] = (
                         f"/videos/{job_id}/"
                         f"{_canonical_clip_file(job_path, base_name, i)}")
+                _attach_landscape_url(job_id, job_path, clip)
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
@@ -2689,6 +2705,7 @@ async def run_job(job_id, job_data):
                              clip_path = os.path.join(output_dir, clip_filename)
                              if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
                                  clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                                 _attach_landscape_url(job_id, output_dir, clip)
                                  ready_clips.append(clip)
                         
                         if ready_clips:
@@ -2780,6 +2797,9 @@ async def get_config():
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        # Self-host builds that can render a 16:9 twin of each clip. The clip
+        # loop waits for this before submitting the next episode.
+        "alsoLandscape": not BILLING_ENABLED,
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -3069,6 +3089,7 @@ async def process_endpoint(
     upload_id: Optional[str] = Form(None),
     local_path: Optional[str] = Form(None),
     max_minutes: Optional[str] = Form(None),
+    also_landscape: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -3105,6 +3126,7 @@ async def process_endpoint(
         upload_id = body.get("upload_id")
         local_path = body.get("local_path")
         max_minutes = body.get("max_minutes")
+        also_landscape = body.get("also_landscape")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3272,6 +3294,13 @@ async def process_endpoint(
     if captions is not None and str(captions).lower() in ("0", "false", "no"):
         env["AUTO_CAPTIONS"] = "0"
         print(f"[captions] job={job_id} auto-captions off")
+
+    # A second file per moment: the native frame, captioned, for landscape
+    # posts. Horizontal jobs already are that frame, so they skip it.
+    if (str(also_landscape).lower() in ("1", "true", "yes")
+            and output_format != "horizontal"):
+        env["ALSO_LANDSCAPE"] = "1"
+        print(f"[landscape] job={job_id} also 16:9")
 
     input_path = None
     if url:
@@ -3761,6 +3790,11 @@ async def download_all_clips(job_id: str, request: Request):
         path = os.path.join(output_dir, filename)
         if filename and os.path.exists(path):
             files.append((i, path))
+        wide = selfhost_library.served_landscape_name(clip)
+        if wide:
+            wide_path = os.path.join(output_dir, wide)
+            if os.path.exists(wide_path):
+                files.append((i, wide_path))
 
     if not files:
         raise HTTPException(status_code=404, detail="No clip files found for this job")
@@ -3899,6 +3933,7 @@ async def _restore_job_files(job_id: str, proj, user_id: str) -> bool:
                 clip['video_url'] = (
                     f"/videos/{job_id}/"
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
+            _attach_landscape_url(job_id, job_dir, clip)
         if any(watermarked.is_marked(c.get("server_file") or "")
                for c in (proj.state or {}).get("clips", [])):
             watermarked.mark_job(job_dir)

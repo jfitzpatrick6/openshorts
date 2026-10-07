@@ -996,6 +996,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         {downloadPct === null ? 'download' : `downloading ${downloadPct}%`}
                     </button>
                 </div>
+                {clip.landscape_url ? (
+                    <a
+                        href={getApiUrl(clip.landscape_url)}
+                        download={`clip-${index + 1}-16x9.mp4`}
+                        className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block"
+                    >
+                        download 16:9
+                    </a>
+                ) : null}
             </div>
 
             {/* Descriptions Modal */}

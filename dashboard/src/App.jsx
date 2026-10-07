@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket } from 'lucide-react';
+import { Upload, Sparkles, Youtube, Instagram, Share2, ChevronDown, Check, Activity, LayoutDashboard, Settings, Plus, History, X, Terminal, Shield, Image, Globe, RotateCcw, Calendar, AlertTriangle, KeyRound, Bot, Users, Smartphone, ExternalLink, Copy, CheckCircle2, Mail, Loader2, Download, Menu, Lock, Rocket, Film } from 'lucide-react';
 import KeyInput from './components/KeyInput';
 import MediaInput from './components/MediaInput';
 import McpConnectCard from './components/McpConnectCard';
@@ -23,6 +23,7 @@ import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
 import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
+import JobsTab from './components/JobsTab';
 import AutopilotTab from './components/AutopilotTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
@@ -565,6 +566,29 @@ function App() {
     setActiveTab('dashboard');
   };
 
+  // Open a job the library already has, including one the clip loop started
+  // on the server, so the generator can show its progress or its clips.
+  const openLibraryJob = async (libraryJobId) => {
+    const data = await pollJob(libraryJobId);
+    flushClipState();
+    setProjectState(null);
+    setNoSource(false);
+    setJobId(libraryJobId);
+    setResults(data.result || null);
+    setLogs(data.logs || []);
+    setLogTimes(data.log_times || []);
+    setQueueInfo(data.status === 'queued' && data.queue ? data.queue : null);
+    setJobError('');
+    setProcessingMedia({ type: 'server', payload: `/api/source/${libraryJobId}` });
+    if (data.status === 'completed') setStatus('complete');
+    else if (data.status === 'failed') {
+      setStatus('error');
+      const errorMsg = (data.logs && data.logs.length > 0) ? data.logs[data.logs.length - 1] : 'Process failed';
+      setJobError(readableError(errorMsg));
+    } else setStatus('processing');
+    setActiveTab('dashboard');
+  };
+
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
@@ -914,7 +938,7 @@ function App() {
   // dropped so a reload does not keep forcing the tab.
   const [autopilotConnected, setAutopilotConnected] = useState(false);
   useEffect(() => {
-    const DEEP_LINK_TABS = ['autopilot', 'history', 'settings', 'thumbnails', 'dashboard'];
+    const DEEP_LINK_TABS = ['autopilot', 'history', 'jobs', 'settings', 'thumbnails', 'dashboard'];
     const apply = () => {
       const hash = window.location.hash || '';
       if (!hash.startsWith('#app?')) return;
@@ -1191,12 +1215,13 @@ function App() {
   // wraps to two lines in a 5-up bar on a 360px phone.
   const navItems = [
     { id: 'dashboard', ord: '01', icon: LayoutDashboard, label: 'Clip Generator', short: 'clips', primary: true },
+    { id: 'jobs', ord: '02', icon: Film, label: 'Jobs', short: 'jobs', primary: true },
     // Cloud only: it runs on the managed pipeline and the Upload-Post connection.
-    ...(billingEnabled ? [{ id: 'autopilot', ord: '02', icon: Rocket, label: 'Autopilot', short: 'autopilot', isNew: true }] : []),
-    { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
-    { id: 'thumbnails', ord: '04', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
-    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '05', icon: History, label: 'History', short: 'history' }] : []),
-    { id: 'settings', ord: '06', icon: Settings, label: 'Settings', short: 'settings' },
+    ...(billingEnabled ? [{ id: 'autopilot', ord: '03', icon: Rocket, label: 'Autopilot', short: 'autopilot', isNew: true }] : []),
+    { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
+    { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
+    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History', short: 'history' }] : []),
+    { id: 'settings', ord: '07', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
 
@@ -1920,6 +1945,12 @@ function App() {
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'jobs' && (
+            <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
+              <JobsTab onOpenJob={openLibraryJob} />
             </div>
           )}
 

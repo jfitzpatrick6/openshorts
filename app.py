@@ -30,6 +30,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import local_media
+import selfhost_library
 import recut
 import layout_ranges
 import watermarked
@@ -53,6 +54,13 @@ MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "0"))
 # Directory the process may read when a job names local_path. Empty disables
 # that field. The path has to be visible inside this process (a bind mount).
 LOCAL_MEDIA_ROOT = os.environ.get("LOCAL_MEDIA_ROOT", "").strip()
+# Finished clips copied out of the job directory. Empty hides that list.
+# RETAINED_DAYS is only the label for how long those copies are kept.
+RETAINED_CLIPS_ROOT = os.environ.get("RETAINED_CLIPS_ROOT", "").strip()
+try:
+    RETAINED_DAYS = int(os.environ.get("RETAINED_DAYS", "30"))
+except ValueError:
+    RETAINED_DAYS = 30
 
 
 def _over_upload_limit(size: int) -> bool:
@@ -3501,6 +3509,64 @@ async def get_status(job_id: str, request: Request):
         # offer), so the dashboard can say so next to the clips.
         "partial": job.get('partial'),
     }
+
+
+def _job_rows_for(owner):
+    """Jobs this caller may see. Self-host passes owner=None and sees them all."""
+    _recover_jobs_from_disk()
+    rows = []
+    for job_id, record in list(jobs.items()):
+        if not isinstance(record, dict):
+            continue
+        if owner is not None and str(record.get("user_id") or "") != str(owner):
+            continue
+        output_dir = record.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
+        try:
+            updated = os.path.getmtime(output_dir)
+        except OSError:
+            updated = None
+        rows.append(selfhost_library.summarize_job(job_id, record, output_dir, updated))
+    return selfhost_library.sort_jobs(rows)
+
+
+@app.get("/api/jobs")
+async def list_jobs(request: Request):
+    """Working and finished jobs still on this server.
+
+    Cloud accounts only see their own. Self-host has no accounts, so the
+    list is every job recovered from disk plus anything running now.
+    """
+    if BILLING_ENABLED:
+        owner = await _owner_id(request)
+        if owner is None:
+            raise HTTPException(status_code=401, detail="Sign in required")
+    else:
+        owner = None
+    return {"jobs": _job_rows_for(owner)}
+
+
+@app.get("/api/retained")
+async def list_retained_clips():
+    """Clips copied out of the job directory and kept on their own clock.
+
+    Off when RETAINED_CLIPS_ROOT is unset, and off entirely on the cloud
+    app, which keeps that library in the account instead of on disk.
+    """
+    if BILLING_ENABLED or not RETAINED_CLIPS_ROOT:
+        return {"enabled": False, "days": RETAINED_DAYS, "episodes": []}
+    return selfhost_library.list_retained(RETAINED_CLIPS_ROOT, RETAINED_DAYS, time.time())
+
+
+@app.get("/api/retained/{episode}/{filename}")
+async def retained_clip_media(episode: str, filename: str):
+    """Stream one kept mp4. The path has to stay inside RETAINED_CLIPS_ROOT."""
+    if BILLING_ENABLED or not RETAINED_CLIPS_ROOT:
+        raise HTTPException(status_code=404, detail="Kept clips are not available")
+    try:
+        path = selfhost_library.retained_file(RETAINED_CLIPS_ROOT, episode, filename)
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=filename)
 
 
 def _locate_source(job_id: str):

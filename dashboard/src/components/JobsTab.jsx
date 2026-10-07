@@ -31,29 +31,37 @@ function scoreTone(score) {
   return 'text-ink2';
 }
 
-// One number per clip, in clip order. A missing score stays null so clip 3
-// is still index 2 when an earlier clip had none.
-function scoresFromClips(clips) {
-  if (!Array.isArray(clips)) return [];
-  return clips.map((clip) => {
-    const raw = clip?.predicted_score;
-    if (raw === null || raw === undefined || raw === '') return null;
-    const score = Number(raw);
-    return Number.isFinite(score) ? Math.round(score) : null;
-  });
+function oneScore(raw) {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const score = Number(raw);
+  return Number.isFinite(score) ? Math.round(score) : null;
 }
 
-function finiteScores(scores) {
-  return (scores || []).filter((score) => Number.isFinite(score));
+function fileName(url) {
+  if (!url) return '';
+  const path = String(url).split('?')[0];
+  const base = path.split('/').pop() || '';
+  try {
+    return decodeURIComponent(base);
+  } catch {
+    return base;
+  }
 }
 
-function sourceKey(source) {
-  return String(source || '').replace(/\.mp4$/i, '');
-}
-
-function clipNumber(clip) {
-  const match = /^clip (\d+)/.exec(clip?.label || '');
-  return match ? Number(match[1]) : null;
+// Kept files are the rendered mp4s, so the score belongs to that filename.
+// The 16:9 twin shares the vertical clip's score.
+function scoresByFilename(clips) {
+  const map = {};
+  if (!Array.isArray(clips)) return map;
+  for (const clip of clips) {
+    const score = oneScore(clip?.predicted_score);
+    if (!Number.isFinite(score)) continue;
+    for (const key of ['video_url', 'landscape_url']) {
+      const name = fileName(clip?.[key]);
+      if (name) map[name] = score;
+    }
+  }
+  return map;
 }
 
 export default function JobsTab({ onOpenJob }) {
@@ -61,8 +69,7 @@ export default function JobsTab({ onOpenJob }) {
   const [kept, setKept] = useState(null);
   const [error, setError] = useState('');
   const [opening, setOpening] = useState('');
-  // Scores the running API process does not put on /api/jobs yet. Filled once
-  // per finished job from the result it already stores. A poll must not refetch.
+  // filename -> score, filled once per finished job. A poll must not refetch.
   const scoreCache = useRef({});
   const [scoreTick, setScoreTick] = useState(0);
   const mounted = useRef(true);
@@ -93,13 +100,12 @@ export default function JobsTab({ onOpenJob }) {
   useEffect(() => {
     if (!jobs) return;
     for (const job of jobs) {
-      if (Array.isArray(job.scores)) continue;
       if (!job.clip_count || WORKING.has(job.status)) continue;
       if (scoreCache.current[job.job_id]) continue;
       scoreCache.current[job.job_id] = 'loading';
       apiJson(`/api/status/${job.job_id}`)
         .then((body) => {
-          scoreCache.current[job.job_id] = scoresFromClips(body?.result?.clips);
+          scoreCache.current[job.job_id] = scoresByFilename(body?.result?.clips);
         })
         .catch(() => {
           scoreCache.current[job.job_id] = [];
@@ -126,18 +132,14 @@ export default function JobsTab({ onOpenJob }) {
   const finished = rows.filter((job) => !WORKING.has(job.status));
   const episodes = kept?.episodes || [];
 
-  const scoresFor = (job) => {
-    if (Array.isArray(job?.scores)) return job.scores;
-    const cached = scoreCache.current[job?.job_id];
-    return Array.isArray(cached) ? cached : [];
-  };
   // scoreTick changes when a fill-in lands in scoreCache. The cache itself
-  // is a ref, so the memo would otherwise keep the empty lists.
-  const scoresByEpisode = useMemo(() => {
+  // is a ref, so the memo would otherwise keep an empty map.
+  const scoreByFile = useMemo(() => {
     const map = new Map();
     for (const job of rows) {
-      const key = sourceKey(job.source);
-      if (key) map.set(key, scoresFor(job));
+      const cached = scoreCache.current[job.job_id];
+      if (!cached || cached === 'loading') continue;
+      for (const [name, score] of Object.entries(cached)) map.set(name, score);
     }
     return map;
   }, [rows, scoreTick]);
@@ -163,7 +165,7 @@ export default function JobsTab({ onOpenJob }) {
         )}
         <div className="space-y-3">
           {working.map((job) => (
-            <JobRow key={job.job_id} job={job} scores={scoresFor(job)} opening={opening} onOpen={open} />
+            <JobRow key={job.job_id} job={job} opening={opening} onOpen={open} />
           ))}
         </div>
       </section>
@@ -175,7 +177,7 @@ export default function JobsTab({ onOpenJob }) {
         )}
         <div className="space-y-3">
           {finished.map((job) => (
-            <JobRow key={job.job_id} job={job} scores={scoresFor(job)} opening={opening} onOpen={open} />
+            <JobRow key={job.job_id} job={job} opening={opening} onOpen={open} />
           ))}
         </div>
       </section>
@@ -204,9 +206,7 @@ export default function JobsTab({ onOpenJob }) {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
                 {episode.clips.map((clip) => {
-                  const number = clipNumber(clip);
-                  const episodeScores = scoresByEpisode.get(episode.name) || [];
-                  const score = number ? episodeScores[number - 1] : null;
+                  const score = scoreByFile.get(clip.name);
                   return (
                     <div key={clip.url} className="card overflow-hidden">
                       <div className={`relative ${clip.shape === '16:9' ? 'aspect-video' : 'aspect-[9/16]'} bg-black`}>
@@ -227,7 +227,14 @@ export default function JobsTab({ onOpenJob }) {
                         )}
                       </div>
                       <div className="p-3">
-                        <p className="text-sm text-ink font-medium lowercase">{clip.label}</p>
+                        <p className="text-sm text-ink font-medium lowercase flex flex-wrap items-baseline gap-x-2">
+                          <span>{clip.label}</span>
+                          {Number.isFinite(score) && (
+                            <span className={`font-mono normal-case ${scoreTone(score)}`} title="Virality score, from 0 to 100">
+                              viral {score}
+                            </span>
+                          )}
+                        </p>
                         <p className="readout mt-0.5">
                           {fmtSize(clip.bytes)}
                           {typeof clip.days_left === 'number' ? ` · ${clip.days_left}d left` : ''}
@@ -248,8 +255,7 @@ export default function JobsTab({ onOpenJob }) {
   );
 }
 
-function JobRow({ job, scores, opening, onOpen }) {
-  const shown = finiteScores(scores);
+function JobRow({ job, opening, onOpen }) {
   return (
     <div className="card p-4 flex flex-wrap items-center justify-between gap-3">
       <div className="min-w-0">
@@ -257,14 +263,6 @@ function JobRow({ job, scores, opening, onOpen }) {
         <p className="readout mt-1 flex flex-wrap items-center gap-2">
           <span className={`${statusBadge(job.status)} px-1.5 py-0.5 rounded-full`}>{job.status}</span>
           <span>{job.clip_count} clip{job.clip_count === 1 ? '' : 's'}</span>
-          {shown.length > 0 && (
-            <span title="Virality scores in clip order, from 0 to 100">
-              viral{' '}
-              {shown.map((score, index) => (
-                <b key={`${index}-${score}`} className={`${scoreTone(score)} ${index ? 'ml-1' : ''}`}>{score}</b>
-              ))}
-            </span>
-          )}
           {job.updated_at ? <span>{fmtWhen(job.updated_at)}</span> : null}
         </p>
         {job.log && <p className="text-muted text-xs mt-1 line-clamp-2">{job.log}</p>}

@@ -149,3 +149,24 @@ def test_score_batch_shrinks_for_local_models(local, monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL")
     monkeypatch.delenv("LLM_SCORE_BATCH")
     assert main.score_batch_size() == 8
+
+
+def test_image_call_sends_data_urls_and_skips_thinking(local, monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return _completion({"layout": "none", "confidence": 0.4, "why": "one face"})
+
+    _serve(handler, monkeypatch)
+    parsed, cost = llm_backend.generate_json_with_images(
+        "pick a layout", [b"\xff\xd8\xff"], gemini_worker.LayoutChoice)
+
+    parts = seen["body"]["messages"][1]["content"]
+    assert parts[0]["type"] == "image_url"
+    assert parts[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert parts[1] == {"type": "text", "text": "pick a layout"}
+    assert seen["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert seen["body"]["max_tokens"] == 512
+    assert parsed["layout"] == "none"
+    assert cost["local"] is True

@@ -76,7 +76,30 @@ class TestPick:
     def test_missing_api_key_degrades_to_none(self, monkeypatch):
         monkeypatch.setattr(layout_picker, "ENABLED", True)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
         assert pick("video.mp4", 60) == "none"
+
+    def test_local_model_sees_the_frames_and_wins_over_gemini(self, monkeypatch):
+        monkeypatch.setattr(layout_picker, "ENABLED", True)
+        monkeypatch.setenv("LLM_BASE_URL", "http://llm.test/v1")
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "should-not-be-used")
+        frames = [b"\xff\xd8jpeg"]
+        monkeypatch.setattr(layout_picker, "sample_frames", lambda *a, **k: frames)
+        seen = {}
+
+        def fake(prompt, images, schema, model=None):
+            seen["prompt"] = prompt
+            seen["images"] = images
+            seen["schema"] = schema
+            return {"layout": "split", "confidence": 0.8, "why": "two people"}, {}
+
+        import llm_backend
+        monkeypatch.setattr(llm_backend, "generate_json_with_images", fake)
+        assert pick("video.mp4", 60) == "split"
+        assert seen["images"] == frames
+        assert "split" in seen["prompt"]
 
     def test_a_failed_call_degrades_to_none(self, monkeypatch):
         # Import failure inside pick() stands in for any API error; the job

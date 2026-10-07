@@ -6,12 +6,11 @@ Ollama, LM Studio, vLLM, llama.cpp's server, LocalAI and OpenRouter all speak
 ``main.get_viral_clips`` go here instead of Gemini, so a self-hosted install
 can run the whole pipeline without a Google key.
 
-What stays on Gemini, because it needs a model that can look at frames or a
-video file: the layout picker (``layout_picker.py``), the on-screen content
-detector (``screencast_layout.py``) and the silent-video path
-(``main.get_visual_clips``). Without a Gemini key those degrade the way they
-already did: the first two return "none", the third fails the job with a clear
-message. Nothing in this module is imported by them.
+The layout picker (``layout_picker.py``) also comes here when this backend is
+active: it posts sampled frames as image parts on the same chat-completions
+endpoint. The on-screen content detector (``screencast_layout.py``) and the
+silent-video path (``main.get_visual_clips``) still call Gemini, and without a
+Gemini key they degrade the way they already did.
 
 Structured output: the prompts already spell out the exact JSON shape, so a
 plain ``json_object`` mode is enough for most models. The request first asks
@@ -23,9 +22,10 @@ so ``main.py`` sees one shape regardless of provider.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
-from typing import Optional, Tuple, Type
+from typing import Optional, Sequence, Tuple, Type
 
 import httpx
 from pydantic import BaseModel
@@ -99,8 +99,8 @@ def _is_format_rejection(resp: httpx.Response) -> bool:
         or "format" in body
 
 
-def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = None,
-                  ) -> Tuple[dict, Optional[dict]]:
+def _complete_json(messages: list, schema: Type[BaseModel], model: Optional[str] = None,
+                   extra: Optional[dict] = None) -> Tuple[dict, Optional[dict]]:
     """One chat completion that must come back as JSON matching ``schema``.
 
     Returns ``(parsed_dict, cost_analysis)`` in the exact shape
@@ -112,14 +112,12 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
 
     url = f"{base_url()}/chat/completions"
     model = model or model_name()
-    messages = [
-        {"role": "system", "content": "You answer with a single JSON object and nothing else."},
-        {"role": "user", "content": prompt},
-    ]
     last_rejection: Optional[str] = None
     with _client() as client:
         for fmt in _response_formats(schema):
             body = {"model": model, "messages": messages, "temperature": 0.2, "stream": False}
+            if extra:
+                body.update(extra)
             if fmt is not None:
                 body["response_format"] = fmt
             resp = client.post(url, json=body, headers=_headers())
@@ -163,3 +161,44 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
         "local": True,
     }
     return validated, cost
+
+
+def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = None,
+                  ) -> Tuple[dict, Optional[dict]]:
+    """Score or rewrite text. See ``_complete_json`` for the return shape."""
+    messages = [
+        {"role": "system", "content": "You answer with a single JSON object and nothing else."},
+        {"role": "user", "content": prompt},
+    ]
+    return _complete_json(messages, schema, model)
+
+
+def generate_json_with_images(prompt: str, images: Sequence[bytes], schema: Type[BaseModel],
+                              model: Optional[str] = None, mime: str = "image/jpeg",
+                              ) -> Tuple[dict, Optional[dict]]:
+    """Same contract as ``generate_json``, with JPEG (or other) frames attached.
+
+    Frames go out as OpenAI ``image_url`` data URLs, which llama.cpp, Ollama
+    and vLLM all accept on a multimodal model. Thinking is turned off for this
+    call: a layout choice is one JSON object, and a reasoning pass on a dozen
+    frames blows the token budget without changing the answer.
+    """
+    parts: list = []
+    for blob in images:
+        encoded = base64.b64encode(blob).decode("ascii")
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{encoded}"},
+        })
+    parts.append({"type": "text", "text": prompt})
+    messages = [
+        {"role": "system", "content": "You answer with a single JSON object and nothing else."},
+        {"role": "user", "content": parts},
+    ]
+    # Qwen3 on llama.cpp honours this and returns the JSON in message.content.
+    # A server that rejects the field fails the call; the layout picker treats
+    # any failure as "none" and keeps the track crop.
+    return _complete_json(
+        messages, schema, model,
+        extra={"max_tokens": 512, "chat_template_kwargs": {"enable_thinking": False}},
+    )

@@ -2514,6 +2514,18 @@ if __name__ == '__main__':
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 
+            # Superchats are a separate pass: the read plus his reply, at most
+            # two extras. A failure here must not sink the clips already chosen.
+            # Gemini-only installs skip it; they have no local voice model wired
+            # the same way, and the lane is built for the self-hosted scorer.
+            if transcript is not None and llm_backend.active():
+                try:
+                    import superchat
+                    superchat.append_to_job(
+                        clips_data["shorts"], transcript, input_video, duration)
+                except Exception as exc:
+                    print(f"   Superchat pass skipped ({exc}).")
+
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).
             clips_data['transcript'] = transcript or {"language": "none", "segments": []}

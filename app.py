@@ -3526,6 +3526,35 @@ def _job_rows_for(owner):
         except OSError:
             updated = None
         rows.append(selfhost_library.summarize_job(job_id, record, output_dir, updated))
+    # A restart leaves the running job as a resume manifest until this
+    # instance picks it up. It is not in memory yet, and disk recovery
+    # skips manifests on purpose, so list it from the manifest.
+    seen = set(jobs)
+    try:
+        names = os.listdir(OUTPUT_DIR)
+    except OSError:
+        names = []
+    now = time.time()
+    for job_id in names:
+        if job_id in seen:
+            continue
+        manifest = _read_manifest(job_id)
+        if not manifest:
+            continue
+        if owner is not None and str(manifest.get("user_id") or "") != str(owner):
+            continue
+        output_dir = os.path.join(OUTPUT_DIR, job_id)
+        heartbeat = float(manifest.get("heartbeat") or 0)
+        record = {
+            "status": "processing" if heartbeat and now - heartbeat < HEARTBEAT_STALE_AFTER else "queued",
+            "logs": ["Waiting to continue on this server."],
+            "output_dir": output_dir,
+        }
+        try:
+            updated = os.path.getmtime(output_dir)
+        except OSError:
+            updated = None
+        rows.append(selfhost_library.summarize_job(job_id, record, output_dir, updated))
     return selfhost_library.sort_jobs(rows)
 
 

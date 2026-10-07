@@ -31,7 +31,9 @@ export default defineConfig({
   server: {
     allowedHosts: [
       'openshorts.app',
-      'www.openshorts.app'
+      'www.openshorts.app',
+      'motion',
+      'motion.taild1e879.ts.net',
     ],
     proxy: {
       '/api': { target: backend, changeOrigin: true },

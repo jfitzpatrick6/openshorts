@@ -2096,19 +2096,77 @@ def speech_is_sparse(transcript, duration):
     return words < MIN_SPEECH_WORDS or words / minutes < MIN_SPEECH_WORDS_PER_MIN
 
 
+def _visual_clips_local(video_path, video_duration, language="en"):
+    """Clip a silent video from a few timestamped frames on the local vision model.
+
+    The whole file is not uploaded. Returns the same {"shorts", "cost_analysis"}
+    shape as the Gemini path, or None when the frames or the model cannot answer.
+    """
+    print(f"🎥  Silent video — local vision ({llm_backend.model_name()}), sampling frames…")
+    try:
+        duration = float(video_duration or 0)
+        if duration <= 0:
+            print("❌ Local vision needs a positive duration.")
+            return None
+        n = 12
+        times = [round((i + 0.5) * duration / n, 3) for i in range(n)]
+        times = [t for t in times if 0 <= t < duration] or [0.0]
+        frames = hook_grounding.frames_at(video_path, times)
+        if not frames:
+            print("❌ No readable frames for the local vision pass.")
+            return None
+        used = times[:len(frames)]
+        stamps = ", ".join(f"image {i} at {t:.3f}s" for i, t in enumerate(used))
+
+        def _env_int(name, default):
+            try:
+                return max(1, int(os.environ.get(name, "")))
+            except ValueError:
+                return default
+
+        v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
+        v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
+        v_min_secs, v_max_secs = clip_duration_bounds()
+        prompt = (
+            "You are looking at still frames, not the whole video. "
+            f"Timestamps of the attached images, in order: {stamps}. "
+            "Choose start and end only from times you can place relative to these frames.\n\n"
+            + gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+                video_duration=video_duration, language=language,
+                min_clips=v_min_clips, max_clips=v_max_clips,
+                min_secs=v_min_secs, max_secs=v_max_secs)
+        )
+        parsed, cost = llm_backend.generate_json_with_images(
+            prompt, frames, gemini_worker.VisualResponse, max_tokens=4096)
+        shorts = parsed.get("shorts") or []
+        clean = []
+        for s in shorts:
+            s["start"] = max(0.0, float(s.get("start", 0)))
+            s["end"] = min(float(video_duration), float(s.get("end", 0)))
+            if s["end"] - s["start"] >= 1.0:
+                clean.append(s)
+        if not clean:
+            print("⚠️ Vision pass returned no usable clips.")
+            return None
+        result = {"shorts": clean}
+        if cost:
+            result["cost_analysis"] = cost
+        return result
+    except Exception as e:
+        print(f"❌ Local vision error: {e}")
+        return None
+
+
 def get_visual_clips(video_path, video_duration, language="en"):
-    """Clip a SILENT video by vision: Gemini watches the footage and picks the
-    most engaging visual moments (no transcript). Returns the same
-    {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
+    """Clip a SILENT video by vision. The local model sees sampled frames; Gemini
+    watches an uploaded file. Returns the same {"shorts", "cost_analysis"} shape
+    as get_viral_clips, or None."""
+    if llm_backend.active():
+        return _visual_clips_local(video_path, video_duration, language)
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        if llm_backend.active():
-            print("❌ This video has no usable speech, so it has to be clipped by "
-                  "watching it, and that needs Gemini (a text-only LLM server "
-                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
-        else:
-            print("❌ Error: GEMINI_API_KEY not found.")
+        print("❌ Error: GEMINI_API_KEY not found.")
         return None
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'

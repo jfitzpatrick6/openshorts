@@ -75,8 +75,14 @@ def test_clip_words_uses_word_timestamps_and_falls_back_to_segment_text():
 
 # --- the rewrite -----------------------------------------------------------
 
+def _no_local_llm(monkeypatch):
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+
 @pytest.fixture
 def gemini(monkeypatch):
+    _no_local_llm(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setattr(hg, "frames_at", lambda path, times, width=None: [b"jpg"] * len(times))
     seen = {}
@@ -112,13 +118,46 @@ def test_rewrites_hook_and_title_and_keeps_the_originals(gemini):
 
 
 def test_without_a_gemini_key_the_transcript_hook_stands(monkeypatch):
+    _no_local_llm(monkeypatch)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     clip = {"viral_hook_text": "old", "layout_ranges": SCREEN}
     assert hg.reground("clip.mp4", clip, {"segments": []}, 0, 30) is None
     assert clip["viral_hook_text"] == "old" and "hook_grounding" not in clip
 
 
+def test_local_model_regrounds_the_hook_without_gemini(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm.example/v1")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(hg, "frames_at", lambda *a, **k: [b"jpg", b"jpg"])
+
+    def boom(*a, **k):
+        raise AssertionError("gemini was called")
+
+    monkeypatch.setattr(hg, "_ask_gemini", boom)
+    seen = {}
+
+    def fake(prompt, images, schema, max_tokens=512):
+        seen["images"] = images
+        seen["prompt"] = prompt
+        seen["schema"] = schema.__name__
+        return {"on_screen": "a spreadsheet",
+                "viral_hook_text": "The sheet shows 7x",
+                "video_title_for_youtube_short": "7x on the sheet"}, None
+
+    monkeypatch.setattr("llm_backend.generate_json_with_images", fake)
+    clip = {"viral_hook_text": "old", "video_title_for_youtube_short": "old title",
+            "layout_ranges": SCREEN}
+    changed = hg.reground("clip.mp4", clip, {"language": "en", "segments": []}, 0, 30)
+    assert changed["on_screen"] == "a spreadsheet"
+    assert clip["viral_hook_text"] == "The sheet shows 7x"
+    assert seen["schema"] == "GroundedHook"
+    assert seen["images"] == [b"jpg", b"jpg"]
+    assert "CURRENT_HOOK" in seen["prompt"]
+
+
 def test_model_failure_never_touches_the_clip(monkeypatch):
+    _no_local_llm(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setattr(hg, "frames_at", lambda *a, **k: [b"jpg"])
     monkeypatch.setattr(hg, "_ask_gemini", lambda *a: (_ for _ in ()).throw(RuntimeError("503")))
@@ -128,6 +167,7 @@ def test_model_failure_never_touches_the_clip(monkeypatch):
 
 
 def test_empty_answer_keeps_the_old_hook(monkeypatch):
+    _no_local_llm(monkeypatch)
     monkeypatch.setenv("GEMINI_API_KEY", "k")
     monkeypatch.setattr(hg, "frames_at", lambda *a, **k: [b"jpg"])
     monkeypatch.setattr(hg, "_ask_gemini", lambda *a: {"viral_hook_text": ""})

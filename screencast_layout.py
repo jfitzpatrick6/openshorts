@@ -26,7 +26,8 @@ What is different here is the question asked and what the answer is used for.
     speaker, which is a reasonable frame even when the trigger was wrong.
 
 Off by default (``SCREENCAST_LAYOUT=1``, set per job by ``layouts=["screencast"]``
-or by the layout picker). Which shots show a screen is asked of Gemini per clip
+or by the layout picker). Which shots show a screen is asked of the local vision
+model when ``LLM_BASE_URL`` is set, and of Gemini otherwise
 (``detect_content_ranges``, one still per shot); without an answer the scenes
 the face classifier sent to GENERAL are taken as the screen (``fallback_ranges``),
 because the job was declared a screencast and GENERAL is the one layout that
@@ -325,38 +326,51 @@ def detect_content_ranges(video_path, scenes, fps):
         return []
     if not scenes:
         return None
+    import llm_backend
+    local = llm_backend.active()
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("   ⚠️ Screen check needs GEMINI_API_KEY.")
+    if not local and not api_key:
+        print("   ⚠️ Screen check needs a vision model (local LLM or GEMINI_API_KEY).")
         return None
 
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     asked = shots_to_ask(scenes)
     print(f"   🔎 Screen check on {len(asked)} shot(s)…")
     try:
-        from google import genai
-        from google.genai import types as genai_types
         import gemini_worker
+        if not local:
+            from google import genai
+            from google.genai import types as genai_types
 
         frames = _shot_frames(video_path, scenes, asked)
         keep = [(i, jpg) for i, jpg in zip(asked, frames) if jpg]
         if not keep:
             print("   ⚠️ No readable frames for the screen check.")
             return None
-        parts = []
-        for n, (_, jpg) in enumerate(keep):
-            parts.append(f"Shot {n}:")
-            parts.append(genai_types.Part.from_bytes(data=jpg, mime_type="image/jpeg"))
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.SHOT_CONTENT_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.ShotContentResponse,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        raw = (json.loads(response.text) or {}).get("shots") or []
+        images = [jpg for _, jpg in keep]
+        if local:
+            answer, _cost = llm_backend.generate_json_with_images(
+                gemini_worker.SHOT_CONTENT_PROMPT,
+                images,
+                gemini_worker.ShotContentResponse,
+                max_tokens=2048,
+            )
+            raw = (answer or {}).get("shots") or []
+        else:
+            model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
+            parts = []
+            for n, jpg in enumerate(images):
+                parts.append(f"Shot {n}:")
+                parts.append(genai_types.Part.from_bytes(data=jpg, mime_type="image/jpeg"))
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts + [gemini_worker.SHOT_CONTENT_PROMPT],
+                config=genai_types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=gemini_worker.ShotContentResponse,
+                ))
+            gemini_worker.raise_if_blocked(response)
+            raw = (json.loads(response.text) or {}).get("shots") or []
     except Exception as e:
         print(f"   ⚠️ Screen check failed ({e}).")
         return None

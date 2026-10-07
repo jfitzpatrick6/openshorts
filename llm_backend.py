@@ -6,11 +6,12 @@ Ollama, LM Studio, vLLM, llama.cpp's server, LocalAI and OpenRouter all speak
 ``main.get_viral_clips`` go here instead of Gemini, so a self-hosted install
 can run the whole pipeline without a Google key.
 
-The layout picker (``layout_picker.py``) also comes here when this backend is
-active: it posts sampled frames as image parts on the same chat-completions
-endpoint. The on-screen content detector (``screencast_layout.py``) and the
-silent-video path (``main.get_visual_clips``) still call Gemini, and without a
-Gemini key they degrade the way they already did.
+The layout picker, the on-screen shot check (``screencast_layout.py``), hook
+grounding, and the silent-video path (``main.get_visual_clips``) also come
+here when this backend is active. They post sampled frames as image parts on
+the same chat-completions endpoint. Thumbnail image generation and the editor's
+whole-file upload stay on Gemini, because this server cannot generate images
+or accept a Gemini File API upload.
 
 Structured output: the prompts already spell out the exact JSON shape, so a
 plain ``json_object`` mode is enough for most models. The request first asks
@@ -175,6 +176,7 @@ def generate_json(prompt: str, schema: Type[BaseModel], model: Optional[str] = N
 
 def generate_json_with_images(prompt: str, images: Sequence[bytes], schema: Type[BaseModel],
                               model: Optional[str] = None, mime: str = "image/jpeg",
+                              max_tokens: int = 512,
                               ) -> Tuple[dict, Optional[dict]]:
     """Same contract as ``generate_json``, with JPEG (or other) frames attached.
 
@@ -200,5 +202,5 @@ def generate_json_with_images(prompt: str, images: Sequence[bytes], schema: Type
     # any failure as "none" and keeps the track crop.
     return _complete_json(
         messages, schema, model,
-        extra={"max_tokens": 512, "chat_template_kwargs": {"enable_thinking": False}},
+        extra={"max_tokens": max_tokens, "chat_template_kwargs": {"enable_thinking": False}},
     )

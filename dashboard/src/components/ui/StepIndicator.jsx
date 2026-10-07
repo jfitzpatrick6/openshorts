@@ -1,8 +1,8 @@
 import { Check } from 'lucide-react';
 
 /**
- * The single wizard stepper (design.md) — shared by ThumbnailStudio and
- * SaaShortsTab. Mono ordinals, hairline connectors, brass current step.
+ * The single wizard stepper (design.md), used by ThumbnailStudio.
+ * Mono ordinals, hairline connectors, brass current step.
  *
  * Props:
  *  - steps: string[] (labels)

@@ -121,8 +121,37 @@ class TestDetectContentRanges:
     def test_no_key_is_a_failure_not_an_empty_answer(self, monkeypatch):
         monkeypatch.setattr(screencast_layout, "ENABLED", True)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
         assert screencast_layout.detect_content_ranges(
             "x.mp4", scenes_of((0, 30)), 30.0) is None
+
+    def test_local_model_labels_each_shot(self, monkeypatch):
+        monkeypatch.setattr(screencast_layout, "ENABLED", True)
+        monkeypatch.setenv("LLM_BASE_URL", "http://llm.example/v1")
+        monkeypatch.delenv("LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(screencast_layout, "_shot_frames",
+                            lambda *a, **k: [b"jpg"])
+        seen = {}
+
+        def fake(prompt, images, schema, max_tokens=512):
+            seen["images"] = images
+            seen["schema"] = schema.__name__
+            seen["max_tokens"] = max_tokens
+            return {"shots": [{
+                "shot": 0, "kind": "screen",
+                "focus_left": 0.1, "focus_right": 0.9, "presenter_cam": False,
+            }]}, None
+
+        monkeypatch.setattr("llm_backend.generate_json_with_images", fake)
+        ranges = screencast_layout.detect_content_ranges(
+            "x.mp4", scenes_of((0, 90)), 30.0)
+        assert seen["schema"] == "ShotContentResponse"
+        assert seen["images"] == [b"jpg"]
+        assert seen["max_tokens"] == 2048
+        assert ranges
+        assert ranges[0][2] == "screen"
 
 
 class TestShotVerdicts:

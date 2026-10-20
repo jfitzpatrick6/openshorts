@@ -155,7 +155,8 @@ def test_sticks_list_keeps_valid_rows_and_drops_escapes(tmp_path):
     (tmp_path / "ep").mkdir()
     os.symlink(outside / "run", tmp_path / "ep" / "link")
     rows = [
-        {"episode": "show", "name": "subtitled_1_show_clip_2", "source": "subtitled_1_show_clip_2.mp4", "status": "ok"},
+        {"episode": "show", "name": "subtitled_1_show_clip_2", "source": "subtitled_1_show_clip_2.mp4", "status": "ok",
+         "social": {"title": "A title", "tiktok": 7, "evil": "<x>", "instagram": "ig text"}},
         {"episode": "..", "name": "run", "status": "ok"},
         {"episode": "ep", "name": "link", "status": "ok"},
         {"episode": "show", "name": "missing", "status": "ok"},
@@ -168,12 +169,26 @@ def test_sticks_list_keeps_valid_rows_and_drops_escapes(tmp_path):
     assert out["sticks"][0]["bytes"] == 10
     assert out["sticks"][0]["label"] == "clip 2 · 9:16"
     assert out["sticks"][0]["url"] == "/api/sticks/show/subtitled_1_show_clip_2"
+    assert out["sticks"][0]["social"] == {"title": "A title", "instagram": "ig text"}
+
+
+def test_sticks_now_reports_fresh_progress_only(tmp_path):
+    import json
+    import time
+    from selfhost_library import list_sticks
+    now = {"episode": "show", "source": "subtitled_1_show_clip_3.mp4", "phase": "posing", "done": 40, "total": 200,
+           "updated": time.time()}
+    (tmp_path / "now.json").write_text(json.dumps(now))
+    got = list_sticks(str(tmp_path))["now"]
+    assert got["label"] == "clip 3 · 9:16" and got["done"] == 40 and got["total"] == 200
+    (tmp_path / "now.json").write_text(json.dumps(dict(now, updated=time.time() - 3600)))
+    assert list_sticks(str(tmp_path))["now"] is None
 
 
 def test_sticks_list_is_off_without_a_root_and_empty_without_an_index(tmp_path):
     from selfhost_library import list_sticks
     assert list_sticks("")["enabled"] is False
-    assert list_sticks(str(tmp_path)) == {"enabled": True, "sticks": []}
+    assert list_sticks(str(tmp_path)) == {"enabled": True, "now": None, "sticks": []}
 
 
 def test_stick_file_rejects_bad_segments(tmp_path):

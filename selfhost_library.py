@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from urllib.parse import quote
 
 from local_media import LocalMediaError, resolve_local_media
@@ -260,6 +261,7 @@ def list_sticks(root: str) -> dict:
     if not root or not os.path.isdir(root):
         return payload
     payload["enabled"] = True
+    payload["now"] = _stick_now(root)
     try:
         with open(os.path.join(root, "index.json")) as handle:
             data = json.load(handle)
@@ -285,8 +287,37 @@ def list_sticks(root: str) -> dict:
             "bytes": size,
             "finished_at": row.get("finished_at"),
             "url": "/api/sticks/" + quote(episode, safe="") + "/" + quote(name, safe=""),
+            "social": _stick_social(row.get("social")),
         })
     return payload
+
+
+_SOCIAL_KEYS = ("title", "tiktok", "instagram", "hook")
+
+
+def _stick_social(raw) -> dict:
+    """Only short plain strings under known keys: this text is shown and copied, never interpreted."""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: raw[k][:2200] for k in _SOCIAL_KEYS if isinstance(raw.get(k), str) and raw[k].strip()}
+
+
+def _stick_now(root: str):
+    """What the animator is working on right now, from now.json, or None when it is idle or the file is stale."""
+    try:
+        with open(os.path.join(root, "now.json")) as handle:
+            now = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(now, dict) or not isinstance(now.get("updated"), (int, float)):
+        return None
+    if time.time() - now["updated"] > 30 * 60:
+        return None
+    def num(v):
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e6 else None
+    return {"label": _clip_label(str(now.get("source") or "")) if now.get("source") else "",
+            "episode": str(now.get("episode") or "")[:300], "phase": str(now.get("phase") or "")[:40],
+            "done": num(now.get("done")), "total": num(now.get("total")), "updated": now["updated"]}
 
 
 def stick_file(root: str, episode: str, name: str) -> str:

@@ -193,44 +193,11 @@ export default function JobsTab({ onOpenJob }) {
         </div>
       </section>
 
-      {sticks?.enabled && (
-        <section className="mb-10">
-          <h2 className="font-display lowercase text-lg text-ink mb-1">animated</h2>
-          <p className="text-muted text-sm mb-4 lowercase">
-            Stick-figure versions of kept clips, newest first, with the clip&apos;s audio and captions.
-          </p>
-          {animated.length === 0 && (
-            <p className="text-muted text-sm lowercase">No animations yet. New kept clips are animated one at a time.</p>
-          )}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-            {animated.map((stick) => (
-              <div key={stick.url} className="card overflow-hidden">
-                <div className="relative aspect-[9/16] bg-black">
-                  <video src={getApiUrl(stick.url)} controls preload="metadata" className="w-full h-full object-contain" />
-                  {stick.status === 'fallback' && (
-                    <span
-                      className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full text-brass"
-                      title="The local model was busy, so poses came from the tracker alone"
-                    >
-                      needs a look
-                    </span>
-                  )}
-                </div>
-                <div className="p-3">
-                  <p className="text-sm text-ink font-medium lowercase">{stick.label}</p>
-                  <p className="readout mt-0.5 truncate" title={stick.episode}>{stick.episode}</p>
-                  <p className="readout mt-0.5">
-                    {fmtSize(stick.bytes)}
-                    {stick.finished_at ? ` · ${new Date(stick.finished_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}
-                  </p>
-                  <a href={getApiUrl(stick.url)} download className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block">
-                    download
-                  </a>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+      {sticks?.enabled && animated.length > 0 && (
+        <p className="readout mb-10">
+          {animated.length} animated clip{animated.length === 1 ? '' : 's'} ·{' '}
+          <a href="#app?tab=animated" className="text-brass hover:text-ink">open the animated tab</a>
+        </p>
       )}
 
       <section>

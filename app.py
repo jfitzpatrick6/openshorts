@@ -3637,6 +3637,18 @@ async def stick_clip_media(episode: str, name: str):
     return FileResponse(path, media_type="video/mp4", filename=f"{name}_stick.mp4")
 
 
+@app.get("/api/sticks/{episode}/{name}/story")
+async def stick_story_media(episode: str, name: str):
+    """Stream the storyboarded version of one stick animation."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        raise HTTPException(status_code=404, detail="Stick animations are not available")
+    try:
+        path = selfhost_library.stick_file(STICKS_ROOT, episode, name, "story")
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=f"{name}_story.mp4")
+
+
 @app.get("/api/retained/{episode}/{filename}")
 async def retained_clip_media(episode: str, filename: str):
     """Stream one kept mp4. The path has to stay inside RETAINED_CLIPS_ROOT."""

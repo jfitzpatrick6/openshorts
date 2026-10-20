@@ -15,9 +15,9 @@ function fmtWhen(iso) {
 }
 
 // The download name a phone or desktop saves: the clip's title when OpenShorts wrote one.
-function fileName(stick) {
+function fileName(stick, suffix = '') {
   const base = (stick.social?.title || stick.name).replace(/[^\w\- ]+/g, '').trim().slice(0, 80) || 'animated';
-  return `${base}.mp4`;
+  return `${base}${suffix ? ` (${suffix})` : ''}.mp4`;
 }
 
 function CopyText({ label, text }) {
@@ -74,6 +74,61 @@ function NowBar({ now }) {
   );
 }
 
+// One clip: the storyboarded version (when it exists) and the posed version that follows the footage.
+function StickCard({ stick }) {
+  const [view, setView] = useState(stick.story_url ? 'story' : 'posed');
+  const story = view === 'story' && stick.story_url;
+  const url = getApiUrl(story ? stick.story_url : stick.url);
+  const bytes = story ? stick.story_bytes : stick.bytes;
+  return (
+    <div className="card overflow-hidden flex flex-col">
+      <div className="relative aspect-[9/16] bg-black">
+        <video key={url} src={url} controls playsInline preload="metadata" className="w-full h-full object-contain" />
+        {!story && stick.status === 'fallback' && (
+          <span
+            className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full text-brass"
+            title="The local model was busy, so poses came from the tracker alone"
+          >
+            needs a look
+          </span>
+        )}
+      </div>
+      <div className="p-4 flex flex-col gap-3 flex-1">
+        {stick.story_url && (
+          <div className="flex rounded-lg border border-white/10 overflow-hidden text-xs font-mono uppercase">
+            {[['story', 'story', 'The model rewrote the clip as an acted-out story'], ['posed', 'posed', 'Follows the real footage']].map(([id, label, tip]) => (
+              <button
+                key={id}
+                type="button"
+                title={tip}
+                onClick={() => setView(id)}
+                className={`flex-1 py-1.5 transition-colors ${view === id ? 'bg-brass/20 text-ink' : 'text-muted hover:text-ink'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+        <div>
+          <p className="text-sm text-ink font-medium">{stick.social?.title || stick.label}</p>
+          <p className="readout mt-0.5 truncate" title={stick.episode}>{stick.label} · {stick.episode}</p>
+          <p className="readout mt-0.5">
+            {fmtSize(bytes)}{stick.finished_at ? ` · ${fmtWhen(stick.finished_at)}` : ''}
+          </p>
+        </div>
+        <a href={url} download={fileName(stick, story ? 'story' : '')} className="btn-primary inline-flex items-center justify-center gap-2">
+          <Download size={15} /> download mp4
+        </a>
+        <div className="flex flex-col gap-2">
+          <CopyText label="title" text={stick.social?.title} />
+          <CopyText label="tiktok" text={stick.social?.tiktok} />
+          <CopyText label="instagram" text={stick.social?.instagram} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AnimatedTab() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -93,8 +148,8 @@ export default function AnimatedTab() {
     <div className="max-w-6xl mx-auto px-4 sm:px-8 py-8">
       <h1 className="font-display lowercase text-2xl text-ink mb-1">animated</h1>
       <p className="text-muted text-sm mb-6 lowercase">
-        Stick-figure versions of your kept clips, newest first, with the clip&apos;s audio and captions. Download, copy the
-        text, post.
+        Stick-figure versions of your kept clips, newest first, with the clip&apos;s audio and captions. Story: the model
+        rewrites the clip as an acted-out cartoon. Posed: the figures follow the real footage. Download, copy the text, post.
       </p>
       {error && <p className="text-danger text-sm mb-4">{error}</p>}
       {data && !data.enabled && (
@@ -105,38 +160,7 @@ export default function AnimatedTab() {
         <p className="text-muted text-sm lowercase">No animations yet. The first one appears here when it finishes.</p>
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-        {sticks.map((stick) => (
-          <div key={stick.url} className="card overflow-hidden flex flex-col">
-            <div className="relative aspect-[9/16] bg-black">
-              <video src={getApiUrl(stick.url)} controls playsInline preload="metadata" className="w-full h-full object-contain" />
-              {stick.status === 'fallback' && (
-                <span
-                  className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full text-brass"
-                  title="The local model was busy, so poses came from the tracker alone"
-                >
-                  needs a look
-                </span>
-              )}
-            </div>
-            <div className="p-4 flex flex-col gap-3 flex-1">
-              <div>
-                <p className="text-sm text-ink font-medium">{stick.social?.title || stick.label}</p>
-                <p className="readout mt-0.5 truncate" title={stick.episode}>{stick.label} · {stick.episode}</p>
-                <p className="readout mt-0.5">
-                  {fmtSize(stick.bytes)}{stick.finished_at ? ` · ${fmtWhen(stick.finished_at)}` : ''}
-                </p>
-              </div>
-              <a href={getApiUrl(stick.url)} download={fileName(stick)} className="btn-primary inline-flex items-center justify-center gap-2">
-                <Download size={15} /> download mp4
-              </a>
-              <div className="flex flex-col gap-2">
-                <CopyText label="title" text={stick.social?.title} />
-                <CopyText label="tiktok" text={stick.social?.tiktok} />
-                <CopyText label="instagram" text={stick.social?.instagram} />
-              </div>
-            </div>
-          </div>
-        ))}
+        {sticks.map((stick) => <StickCard key={stick.url} stick={stick} />)}
       </div>
     </div>
   );

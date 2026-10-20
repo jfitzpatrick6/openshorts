@@ -198,3 +198,21 @@ def test_stick_file_rejects_bad_segments(tmp_path):
     for episode, name in (("..", "run"), ("show", "../run"), (".hidden", "run"), ("show", "")):
         with pytest.raises(LocalMediaError):
             stick_file(str(tmp_path), episode, name)
+
+
+def test_sticks_list_adds_the_story_version_when_present(tmp_path):
+    import json
+    from selfhost_library import list_sticks, stick_file
+    run = _stick(tmp_path, "show", "subtitled_1_show_clip_2")
+    rows = [{"episode": "show", "name": "subtitled_1_show_clip_2", "source": "subtitled_1_show_clip_2.mp4"}]
+    (tmp_path / "index.json").write_text(json.dumps({"sticks": rows}))
+    assert "story_url" not in list_sticks(str(tmp_path))["sticks"][0]
+    (tmp_path / "show" / "subtitled_1_show_clip_2" / "story").mkdir()
+    (tmp_path / "show" / "subtitled_1_show_clip_2" / "story" / "story.mp4").write_bytes(b"s" * 7)
+    got = list_sticks(str(tmp_path))["sticks"][0]
+    assert got["story_url"] == "/api/sticks/show/subtitled_1_show_clip_2/story" and got["story_bytes"] == 7
+    assert stick_file(str(tmp_path), "show", "subtitled_1_show_clip_2", "story").endswith("story.mp4")
+    import pytest
+    from local_media import LocalMediaError
+    with pytest.raises(LocalMediaError):
+        stick_file(str(tmp_path), "show", "subtitled_1_show_clip_2", "../x")

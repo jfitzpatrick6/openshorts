@@ -289,6 +289,12 @@ def list_sticks(root: str) -> dict:
             "url": "/api/sticks/" + quote(episode, safe="") + "/" + quote(name, safe=""),
             "social": _stick_social(row.get("social")),
         })
+        try:
+            story = stick_file(root, episode, name, "story")
+            payload["sticks"][-1]["story_url"] = payload["sticks"][-1]["url"] + "/story"
+            payload["sticks"][-1]["story_bytes"] = os.path.getsize(story)
+        except (LocalMediaError, OSError):
+            pass
     return payload
 
 
@@ -320,9 +326,12 @@ def _stick_now(root: str):
             "done": num(now.get("done")), "total": num(now.get("total")), "updated": now["updated"]}
 
 
-def stick_file(root: str, episode: str, name: str) -> str:
-    """Absolute path of one stick.mp4, or raise ``LocalMediaError``."""
+_STICK_KINDS = {"stick": ("stick.mp4",), "story": ("story", "story.mp4")}
+
+
+def stick_file(root: str, episode: str, name: str, kind: str = "stick") -> str:
+    """Absolute path of one animation (``stick``: the posed version, ``story``: the storyboarded one), or raise ``LocalMediaError``."""
     episode, name = str(episode or "").strip(), str(name or "").strip()
-    if not episode or not name or _bad_segment(episode) or _bad_segment(name):
+    if not episode or not name or _bad_segment(episode) or _bad_segment(name) or kind not in _STICK_KINDS:
         raise LocalMediaError(400, "bad stick path")
-    return resolve_local_media(os.path.join(root, episode, name, "stick.mp4"), root)
+    return resolve_local_media(os.path.join(root, episode, name, *_STICK_KINDS[kind]), root)

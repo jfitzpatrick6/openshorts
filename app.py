@@ -57,6 +57,8 @@ LOCAL_MEDIA_ROOT = os.environ.get("LOCAL_MEDIA_ROOT", "").strip()
 # Finished clips copied out of the job directory. Empty hides that list.
 # RETAINED_DAYS is only the label for how long those copies are kept.
 RETAINED_CLIPS_ROOT = os.environ.get("RETAINED_CLIPS_ROOT", "").strip()
+# Stick animations of kept clips, rendered by stickpass on the host (read-only).
+STICKS_ROOT = os.environ.get("STICKS_ROOT", "").strip()
 try:
     RETAINED_DAYS = int(os.environ.get("RETAINED_DAYS", "30"))
 except ValueError:
@@ -3613,6 +3615,26 @@ async def list_retained_clips():
     if BILLING_ENABLED or not RETAINED_CLIPS_ROOT:
         return {"enabled": False, "days": RETAINED_DAYS, "episodes": []}
     return selfhost_library.list_retained(RETAINED_CLIPS_ROOT, RETAINED_DAYS, time.time())
+
+
+@app.get("/api/sticks")
+async def list_stick_clips():
+    """Stick animations of kept clips. Off when STICKS_ROOT is unset and on the cloud app."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        return {"enabled": False, "sticks": []}
+    return selfhost_library.list_sticks(STICKS_ROOT)
+
+
+@app.get("/api/sticks/{episode}/{name}")
+async def stick_clip_media(episode: str, name: str):
+    """Stream one stick animation. The path has to stay inside STICKS_ROOT."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        raise HTTPException(status_code=404, detail="Stick animations are not available")
+    try:
+        path = selfhost_library.stick_file(STICKS_ROOT, episode, name)
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=f"{name}_stick.mp4")
 
 
 @app.get("/api/retained/{episode}/{filename}")

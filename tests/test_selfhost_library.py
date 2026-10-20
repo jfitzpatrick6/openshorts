@@ -137,3 +137,49 @@ def test_retained_file_rejects_a_symlink_and_a_non_video(tmp_path):
         retained_file(str(root), "..", "secret.mp4")
     with pytest.raises(LocalMediaError):
         retained_file(str(root), "show", "../secret.mp4")
+
+
+def _stick(root, episode, name, data=b"mp4"):
+    run = root / episode / name
+    run.mkdir(parents=True)
+    (run / "stick.mp4").write_bytes(data)
+
+
+def test_sticks_list_keeps_valid_rows_and_drops_escapes(tmp_path):
+    import json
+    from selfhost_library import list_sticks
+    _stick(tmp_path, "show", "subtitled_1_show_clip_2", b"x" * 10)
+    outside = tmp_path.parent / "elsewhere"
+    (outside / "run").mkdir(parents=True, exist_ok=True)
+    (outside / "run" / "stick.mp4").write_bytes(b"y")
+    (tmp_path / "ep").mkdir()
+    os.symlink(outside / "run", tmp_path / "ep" / "link")
+    rows = [
+        {"episode": "show", "name": "subtitled_1_show_clip_2", "source": "subtitled_1_show_clip_2.mp4", "status": "ok"},
+        {"episode": "..", "name": "run", "status": "ok"},
+        {"episode": "ep", "name": "link", "status": "ok"},
+        {"episode": "show", "name": "missing", "status": "ok"},
+        "junk",
+    ]
+    (tmp_path / "index.json").write_text(json.dumps({"sticks": rows}))
+    out = list_sticks(str(tmp_path))
+    assert out["enabled"] is True
+    assert [s["name"] for s in out["sticks"]] == ["subtitled_1_show_clip_2"]
+    assert out["sticks"][0]["bytes"] == 10
+    assert out["sticks"][0]["label"] == "clip 2 · 9:16"
+    assert out["sticks"][0]["url"] == "/api/sticks/show/subtitled_1_show_clip_2"
+
+
+def test_sticks_list_is_off_without_a_root_and_empty_without_an_index(tmp_path):
+    from selfhost_library import list_sticks
+    assert list_sticks("")["enabled"] is False
+    assert list_sticks(str(tmp_path)) == {"enabled": True, "sticks": []}
+
+
+def test_stick_file_rejects_bad_segments(tmp_path):
+    from selfhost_library import stick_file
+    _stick(tmp_path, "show", "run")
+    assert stick_file(str(tmp_path), "show", "run").endswith("stick.mp4")
+    for episode, name in (("..", "run"), ("show", "../run"), (".hidden", "run"), ("show", "")):
+        with pytest.raises(LocalMediaError):
+            stick_file(str(tmp_path), episode, name)

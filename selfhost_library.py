@@ -7,6 +7,7 @@ Nothing outside that directory can be listed or streamed.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from urllib.parse import quote
@@ -245,3 +246,52 @@ def _bad_segment(segment: str) -> bool:
     if segment in (".", "..") or segment.startswith("."):
         return True
     return "/" in segment or "\\" in segment or "\x00" in segment
+
+
+def list_sticks(root: str) -> dict:
+    """Stick animations of kept clips, from the index stickpass writes.
+
+    ``root`` is the read-only sticks tree. Each entry must name a single-segment
+    episode and run directory whose stick.mp4 resolves inside the root; anything
+    else in the index is ignored.
+    """
+    root = (root or "").strip()
+    payload = {"enabled": False, "sticks": []}
+    if not root or not os.path.isdir(root):
+        return payload
+    payload["enabled"] = True
+    try:
+        with open(os.path.join(root, "index.json")) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return payload
+    rows = data.get("sticks") if isinstance(data, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        episode, name = str(row.get("episode") or ""), str(row.get("name") or "")
+        try:
+            path = stick_file(root, episode, name)
+            size = os.path.getsize(path)
+        except (LocalMediaError, OSError):
+            continue
+        source = str(row.get("source") or "")
+        payload["sticks"].append({
+            "episode": episode,
+            "name": name,
+            "source": source,
+            "label": _clip_label(source) if source else name,
+            "status": str(row.get("status") or ""),
+            "bytes": size,
+            "finished_at": row.get("finished_at"),
+            "url": "/api/sticks/" + quote(episode, safe="") + "/" + quote(name, safe=""),
+        })
+    return payload
+
+
+def stick_file(root: str, episode: str, name: str) -> str:
+    """Absolute path of one stick.mp4, or raise ``LocalMediaError``."""
+    episode, name = str(episode or "").strip(), str(name or "").strip()
+    if not episode or not name or _bad_segment(episode) or _bad_segment(name):
+        raise LocalMediaError(400, "bad stick path")
+    return resolve_local_media(os.path.join(root, episode, name, "stick.mp4"), root)

@@ -67,6 +67,7 @@ function scoresByFilename(clips) {
 export default function JobsTab({ onOpenJob }) {
   const [jobs, setJobs] = useState(null);
   const [kept, setKept] = useState(null);
+  const [sticks, setSticks] = useState(null);
   const [error, setError] = useState('');
   const [opening, setOpening] = useState('');
   // filename -> score, filled once per finished job. A poll must not refetch.
@@ -77,11 +78,14 @@ export default function JobsTab({ onOpenJob }) {
   useEffect(() => {
     let cancelled = false;
     const load = () => {
-      Promise.all([apiJson('/api/jobs'), apiJson('/api/retained')])
-        .then(([jobBody, keptBody]) => {
+      // An older backend has no /api/sticks; the section just stays hidden.
+      const stickList = apiJson('/api/sticks').catch(() => ({ enabled: false, sticks: [] }));
+      Promise.all([apiJson('/api/jobs'), apiJson('/api/retained'), stickList])
+        .then(([jobBody, keptBody, stickBody]) => {
           if (cancelled) return;
           setJobs(jobBody.jobs || []);
           setKept(keptBody);
+          setSticks(stickBody);
           setError('');
         })
         .catch(() => {
@@ -131,6 +135,13 @@ export default function JobsTab({ onOpenJob }) {
   const working = rows.filter((job) => WORKING.has(job.status));
   const finished = rows.filter((job) => !WORKING.has(job.status));
   const episodes = kept?.episodes || [];
+  const animated = sticks?.sticks || [];
+  // episode/source filename -> stick url, for the link on each kept clip.
+  const stickBySource = useMemo(() => {
+    const map = new Map();
+    for (const stick of animated) map.set(`${stick.episode}/${stick.source}`, stick.url);
+    return map;
+  }, [animated]);
 
   // scoreTick changes when a fill-in lands in scoreCache. The cache itself
   // is a ref, so the memo would otherwise keep an empty map.
@@ -181,6 +192,46 @@ export default function JobsTab({ onOpenJob }) {
           ))}
         </div>
       </section>
+
+      {sticks?.enabled && (
+        <section className="mb-10">
+          <h2 className="font-display lowercase text-lg text-ink mb-1">animated</h2>
+          <p className="text-muted text-sm mb-4 lowercase">
+            Stick-figure versions of kept clips, newest first, with the clip&apos;s audio and captions.
+          </p>
+          {animated.length === 0 && (
+            <p className="text-muted text-sm lowercase">No animations yet. New kept clips are animated one at a time.</p>
+          )}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            {animated.map((stick) => (
+              <div key={stick.url} className="card overflow-hidden">
+                <div className="relative aspect-[9/16] bg-black">
+                  <video src={getApiUrl(stick.url)} controls preload="metadata" className="w-full h-full object-contain" />
+                  {stick.status === 'fallback' && (
+                    <span
+                      className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full text-brass"
+                      title="The local model was busy, so poses came from the tracker alone"
+                    >
+                      needs a look
+                    </span>
+                  )}
+                </div>
+                <div className="p-3">
+                  <p className="text-sm text-ink font-medium lowercase">{stick.label}</p>
+                  <p className="readout mt-0.5 truncate" title={stick.episode}>{stick.episode}</p>
+                  <p className="readout mt-0.5">
+                    {fmtSize(stick.bytes)}
+                    {stick.finished_at ? ` · ${new Date(stick.finished_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}` : ''}
+                  </p>
+                  <a href={getApiUrl(stick.url)} download className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block">
+                    download
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h2 className="font-display lowercase text-lg text-ink mb-3">kept clips</h2>
@@ -242,6 +293,15 @@ export default function JobsTab({ onOpenJob }) {
                         <a href={getApiUrl(clip.url)} download className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 inline-block">
                           download
                         </a>
+                        {stickBySource.get(`${episode.name}/${clip.name}`) && (
+                          <a
+                            href={getApiUrl(stickBySource.get(`${episode.name}/${clip.name}`))}
+                            download
+                            className="text-micro font-mono uppercase text-brass hover:text-ink mt-2 ml-3 inline-block"
+                          >
+                            animated ↓
+                          </a>
+                        )}
                       </div>
                     </div>
                   );

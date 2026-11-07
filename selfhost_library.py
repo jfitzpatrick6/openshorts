@@ -1,0 +1,337 @@
+"""What a self-host dashboard can list without a cloud account.
+
+Working jobs already live in the OpenShorts output directory. Kept clips are
+a separate directory (the 30-day inbox) named by ``RETAINED_CLIPS_ROOT``.
+Nothing outside that directory can be listed or streamed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+from urllib.parse import quote
+
+from local_media import LocalMediaError, resolve_local_media
+
+_CLIP_NUM = re.compile(r"_clip_(\d+)(_16x9)?\.mp4$", re.IGNORECASE)
+_TITLE_KEYS = (
+    "video_title_for_youtube_short",
+    "title",
+    "headline",
+    "viral_hook_text",
+)
+
+
+def clip_scores(clips) -> list:
+    """One virality score per clip, in clip order.
+
+    A clip with no numeric ``predicted_score`` is ``None``, so the list stays
+    aligned with clip 1, clip 2, and so on. Booleans are not scores.
+    """
+    scores = []
+    if not isinstance(clips, list):
+        return scores
+    for clip in clips:
+        scores.append(_one_score(clip))
+    return scores
+
+
+def _one_score(clip) -> int | None:
+    if not isinstance(clip, dict):
+        return None
+    raw = clip.get("predicted_score")
+    if isinstance(raw, bool) or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        score = int(round(float(raw)))
+    except (TypeError, ValueError):
+        return None
+    return score
+
+
+def clip_title(clip: dict) -> str:
+    """The shortest human title a clip record carries, or ''."""
+    if not isinstance(clip, dict):
+        return ""
+    for key in _TITLE_KEYS:
+        value = clip.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def source_name(output_dir: str) -> str:
+    """Basename recorded for a local_path job, or ''."""
+    try:
+        with open(os.path.join(output_dir, "source_path.txt")) as handle:
+            text = handle.read().strip()
+    except OSError:
+        return ""
+    return os.path.basename(text)
+
+
+def summarize_job(job_id: str, record: dict, output_dir: str, updated_at: float | None) -> dict:
+    """One row for the jobs list. ``record`` is the in-memory job dict."""
+    result = record.get("result") or {}
+    clips = result.get("clips") if isinstance(result, dict) else None
+    if not isinstance(clips, list):
+        clips = []
+    title = ""
+    for clip in clips:
+        title = clip_title(clip)
+        if title:
+            break
+    source = source_name(output_dir)
+    last = ""
+    for line in reversed(list(record.get("logs") or [])):
+        if isinstance(line, str) and line.strip():
+            last = line.strip()
+            break
+    return {
+        "job_id": job_id,
+        "status": str(record.get("status") or "unknown"),
+        "title": title or source or job_id[:8],
+        "source": source,
+        "clip_count": len(clips),
+        "scores": clip_scores(clips),
+        "log": last[:240],
+        "updated_at": updated_at,
+    }
+
+
+def sort_jobs(rows: list[dict]) -> list[dict]:
+    """Working jobs first, then the most recently touched."""
+    def key(row: dict):
+        working = row.get("status") in ("processing", "queued")
+        stamp = row.get("updated_at") or 0
+        return (0 if working else 1, -stamp)
+
+    return sorted(rows, key=key)
+
+
+def served_landscape_name(clip: dict) -> str:
+    """Basename recorded for the 16:9 twin, or '' when it is not a plain mp4 name."""
+    if not isinstance(clip, dict):
+        return ""
+    raw = clip.get("landscape_file")
+    if not isinstance(raw, str):
+        return ""
+    name = raw.strip()
+    if not name or name != os.path.basename(name) or name.startswith("."):
+        return ""
+    if not name.lower().endswith(".mp4"):
+        return ""
+    return name
+
+
+def _clip_shape(filename: str) -> str:
+    match = _CLIP_NUM.search(filename)
+    if not match:
+        return ""
+    return "16:9" if match.group(2) else "9:16"
+
+
+def _clip_label(filename: str) -> str:
+    match = _CLIP_NUM.search(filename)
+    if not match:
+        return filename
+    return f"clip {int(match.group(1))} · {_clip_shape(filename)}"
+
+
+def _inside_dir(root_real: str, path: str) -> bool:
+    try:
+        return os.path.commonpath([root_real, os.path.realpath(path)]) == root_real
+    except ValueError:
+        return False
+
+
+def list_retained(root: str, days: int, now: float) -> dict:
+    """Episodes and mp4s inside ``root``.
+
+    An empty or missing root disables the list. A symlink that leaves the
+    root is skipped. ``days`` is how long the prune keeps a file, so
+    ``days_left`` can hit zero while the file is still on disk.
+    """
+    root = (root or "").strip()
+    payload = {"enabled": False, "days": days, "episodes": []}
+    if not root:
+        return payload
+    root_real = os.path.realpath(root)
+    if not os.path.isdir(root_real):
+        return payload
+    payload["enabled"] = True
+    episodes = []
+    try:
+        names = sorted(os.listdir(root_real))
+    except OSError:
+        return payload
+    for name in names:
+        if not name or name.startswith("."):
+            continue
+        episode_dir = os.path.join(root_real, name)
+        if not _inside_dir(root_real, episode_dir) or not os.path.isdir(episode_dir):
+            continue
+        clips = []
+        try:
+            files = sorted(os.listdir(episode_dir))
+        except OSError:
+            continue
+        for filename in files:
+            if not filename.lower().endswith(".mp4") or filename.startswith("."):
+                continue
+            try:
+                path = retained_file(root_real, name, filename)
+            except LocalMediaError:
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            age_days = int(max(0, now - st.st_mtime) // 86400)
+            item = {
+                "name": filename,
+                "label": _clip_label(filename),
+                "bytes": st.st_size,
+                "mtime": st.st_mtime,
+                "days_left": max(0, days - age_days),
+                "url": "/api/retained/" + quote(name, safe="") + "/" + quote(filename, safe=""),
+            }
+            shape = _clip_shape(filename)
+            if shape:
+                item["shape"] = shape
+            clips.append(item)
+        if not clips:
+            continue
+        clips.sort(key=lambda item: _clip_sort(item["name"]))
+        episodes.append({
+            "name": name,
+            "updated_at": max(item["mtime"] for item in clips),
+            "clips": clips,
+        })
+    episodes.sort(key=lambda item: item["updated_at"], reverse=True)
+    payload["episodes"] = episodes
+    return payload
+
+
+def _clip_sort(filename: str) -> tuple:
+    """Vertical before the 16:9 of the same moment, then by filename."""
+    match = _CLIP_NUM.search(filename)
+    if not match:
+        return (10**9, 1, filename)
+    wide = 1 if match.group(2) else 0
+    return (int(match.group(1)), wide, filename)
+
+
+def retained_file(root: str, episode: str, filename: str) -> str:
+    """Absolute path of one kept mp4, or raise ``LocalMediaError``.
+
+    Both components have to be a single path segment. The resolved path
+    still has to land inside ``root``, so a symlink out of the inbox fails.
+    """
+    episode = str(episode or "").strip()
+    filename = str(filename or "").strip()
+    if not episode or not filename:
+        raise LocalMediaError(400, "missing clip path")
+    if _bad_segment(episode) or _bad_segment(filename):
+        raise LocalMediaError(400, "bad clip path")
+    if not filename.lower().endswith(".mp4"):
+        raise LocalMediaError(404, "not a clip")
+    return resolve_local_media(os.path.join(root, episode, filename), root)
+
+
+def _bad_segment(segment: str) -> bool:
+    if segment in (".", "..") or segment.startswith("."):
+        return True
+    return "/" in segment or "\\" in segment or "\x00" in segment
+
+
+def list_sticks(root: str) -> dict:
+    """Stick animations of kept clips, from the index stickpass writes.
+
+    ``root`` is the read-only sticks tree. Each entry must name a single-segment
+    episode and run directory whose stick.mp4 resolves inside the root; anything
+    else in the index is ignored.
+    """
+    root = (root or "").strip()
+    payload = {"enabled": False, "sticks": []}
+    if not root or not os.path.isdir(root):
+        return payload
+    payload["enabled"] = True
+    payload["now"] = _stick_now(root)
+    try:
+        with open(os.path.join(root, "index.json")) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return payload
+    rows = data.get("sticks") if isinstance(data, dict) else None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        episode, name = str(row.get("episode") or ""), str(row.get("name") or "")
+        try:
+            path = stick_file(root, episode, name)
+            size = os.path.getsize(path)
+        except (LocalMediaError, OSError):
+            continue
+        source = str(row.get("source") or "")
+        payload["sticks"].append({
+            "episode": episode,
+            "name": name,
+            "source": source,
+            "label": _clip_label(source) if source else name,
+            "status": str(row.get("status") or ""),
+            "bytes": size,
+            "finished_at": row.get("finished_at"),
+            "url": "/api/sticks/" + quote(episode, safe="") + "/" + quote(name, safe=""),
+            "social": _stick_social(row.get("social")),
+        })
+        try:
+            story = stick_file(root, episode, name, "story")
+            payload["sticks"][-1]["story_url"] = payload["sticks"][-1]["url"] + "/story"
+            payload["sticks"][-1]["story_bytes"] = os.path.getsize(story)
+        except (LocalMediaError, OSError):
+            pass
+    return payload
+
+
+_SOCIAL_KEYS = ("title", "tiktok", "instagram", "hook")
+
+
+def _stick_social(raw) -> dict:
+    """Only short plain strings under known keys: this text is shown and copied, never interpreted."""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: raw[k][:2200] for k in _SOCIAL_KEYS if isinstance(raw.get(k), str) and raw[k].strip()}
+
+
+def _stick_now(root: str):
+    """What the animator is working on right now, from now.json, or None when it is idle or the file is stale."""
+    try:
+        with open(os.path.join(root, "now.json")) as handle:
+            now = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(now, dict) or not isinstance(now.get("updated"), (int, float)):
+        return None
+    if time.time() - now["updated"] > 30 * 60:
+        return None
+    def num(v):
+        return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e6 else None
+    return {"label": _clip_label(str(now.get("source") or "")) if now.get("source") else "",
+            "episode": str(now.get("episode") or "")[:300], "phase": str(now.get("phase") or "")[:40],
+            "done": num(now.get("done")), "total": num(now.get("total")), "updated": now["updated"]}
+
+
+_STICK_KINDS = {"stick": ("stick.mp4",), "story": ("story", "story.mp4")}
+
+
+def stick_file(root: str, episode: str, name: str, kind: str = "stick") -> str:
+    """Absolute path of one animation (``stick``: the posed version, ``story``: the storyboarded one), or raise ``LocalMediaError``."""
+    episode, name = str(episode or "").strip(), str(name or "").strip()
+    if not episode or not name or _bad_segment(episode) or _bad_segment(name) or kind not in _STICK_KINDS:
+        raise LocalMediaError(400, "bad stick path")
+    return resolve_local_media(os.path.join(root, episode, name, *_STICK_KINDS[kind]), root)

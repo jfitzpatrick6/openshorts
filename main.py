@@ -1479,6 +1479,42 @@ def trim_subtitle_band(input_video, band):
     except (subprocess.SubprocessError, OSError) as e:
         print(f"   ⚠️ Could not trim the source subtitles ({e}) — rendering as is.")
         return input_video
+def also_landscape(output_format):
+    """True when this job should also keep a native 16:9 of each clip.
+
+    The primary render stays whatever ``--format`` asked for. A job that is
+    already horizontal does not need a second copy of the same frames.
+    """
+    flag = os.environ.get("ALSO_LANDSCAPE", "").strip().lower()
+    if flag not in ("1", "true", "yes"):
+        return False
+    return output_format != "horizontal"
+
+
+def write_landscape_copy(clip_temp_path, clip_final_path, transcript, start, end, clip):
+    """Captioned 16:9 beside the vertical clip, taken from the native cut.
+
+    The cut is the source frame. Copy it before the caller deletes that temp.
+    Captions get an empty seam list so they do not sit on the vertical split.
+    A failure here leaves the vertical clip as the only file.
+    """
+    wide_path = os.path.splitext(clip_final_path)[0] + "_16x9.mp4"
+    try:
+        if not finalize_clip_passthrough(clip_temp_path, wide_path):
+            return
+        served = wide_path
+        captioned = auto_caption_clip(
+            wide_path, transcript, start, end, split_ranges=[])
+        if captioned:
+            served = captioned
+        if os.environ.get("WATERMARK") == "1":
+            served = mark_delivery(served)
+        if served and os.path.getsize(served) > 0:
+            clip["landscape_file"] = os.path.basename(served)
+            print(f"   🖼️ Landscape copy: {clip['landscape_file']}")
+    except Exception as e:
+        print(f"   ⚠️ Landscape copy failed ({type(e).__name__}: {e}) — "
+              f"the vertical clip still ships.")
 
 
 def render_clip(input_video, final_output_video, output_format="auto",
@@ -2269,6 +2305,67 @@ def speech_is_sparse(transcript, duration):
     return words < MIN_SPEECH_WORDS or words / minutes < MIN_SPEECH_WORDS_PER_MIN
 
 
+def _visual_clips_local(video_path, video_duration, language="en"):
+    """Clip a silent video from a few timestamped frames on the local vision model.
+
+    The whole file is not uploaded. Returns the same {"shorts", "cost_analysis"}
+    shape as the Gemini path, or None when the frames or the model cannot answer.
+    """
+    print(f"🎥  Silent video — local vision ({llm_backend.model_name()}), sampling frames…")
+    try:
+        duration = float(video_duration or 0)
+        if duration <= 0:
+            print("❌ Local vision needs a positive duration.")
+            return None
+        n = 12
+        times = [round((i + 0.5) * duration / n, 3) for i in range(n)]
+        times = [t for t in times if 0 <= t < duration] or [0.0]
+        frames = hook_grounding.frames_at(video_path, times)
+        if not frames:
+            print("❌ No readable frames for the local vision pass.")
+            return None
+        used = times[:len(frames)]
+        stamps = ", ".join(f"image {i} at {t:.3f}s" for i, t in enumerate(used))
+
+        def _env_int(name, default):
+            try:
+                return max(1, int(os.environ.get(name, "")))
+            except ValueError:
+                return default
+
+        v_min_clips = _env_int("CLIP_TARGET_MIN", 3)
+        v_max_clips = max(v_min_clips, _env_int("CLIP_TARGET_MAX", 15))
+        v_min_secs, v_max_secs = clip_duration_bounds()
+        prompt = (
+            "You are looking at still frames, not the whole video. "
+            f"Timestamps of the attached images, in order: {stamps}. "
+            "Choose start and end only from times you can place relative to these frames.\n\n"
+            + gemini_worker.VISUAL_PROMPT_TEMPLATE.format(
+                video_duration=video_duration, language=language,
+                min_clips=v_min_clips, max_clips=v_max_clips,
+                min_secs=v_min_secs, max_secs=v_max_secs)
+        )
+        parsed, cost = llm_backend.generate_json_with_images(
+            prompt, frames, gemini_worker.VisualResponse, max_tokens=4096)
+        shorts = parsed.get("shorts") or []
+        clean = []
+        for s in shorts:
+            s["start"] = max(0.0, float(s.get("start", 0)))
+            s["end"] = min(float(video_duration), float(s.get("end", 0)))
+            if s["end"] - s["start"] >= 1.0:
+                clean.append(s)
+        if not clean:
+            print("⚠️ Vision pass returned no usable clips.")
+            return None
+        result = {"shorts": clean}
+        if cost:
+            result["cost_analysis"] = cost
+        return result
+    except Exception as e:
+        print(f"❌ Local vision error: {e}")
+        return None
+
+
 # Silent footage is sent to Gemini as video (~300 tokens/s): an hour no longer
 # fits a 1M-token window. Longer sources are analysed in near-equal stretches
 # of at most VISION_SEGMENT_SECONDS, each a low-resolution proxy, and the picks
@@ -2382,15 +2479,13 @@ def get_visual_clips(video_path, video_duration, language="en", viewer_clips=Non
     stretch (``vision_segments``), each as a 360p/1 fps proxy, and the picks
     are merged, de-overlapped and cut to the best ``CLIP_TARGET_MAX`` by
     score: a silent multi-hour console capture used to fail at the model."""
+    if llm_backend.active():
+        return _visual_clips_local(video_path, video_duration, language)
+
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
-        if llm_backend.active():
-            print("❌ This video has no usable speech, so it has to be clipped by "
-                  "watching it, and that needs Gemini (a text-only LLM server "
-                  "cannot see the footage). Add a GEMINI_API_KEY for silent videos.")
-        else:
-            print("❌ Error: GEMINI_API_KEY not found.")
+        print("❌ Error: GEMINI_API_KEY not found.")
         return None
     client = genai.Client(api_key=api_key)
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
@@ -2749,6 +2844,18 @@ if __name__ == '__main__':
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 
+            # Superchats are a separate pass: the read plus his reply, at most
+            # two extras. A failure here must not sink the clips already chosen.
+            # Gemini-only installs skip it; they have no local voice model wired
+            # the same way, and the lane is built for the self-hosted scorer.
+            if transcript is not None and llm_backend.active():
+                try:
+                    import superchat
+                    superchat.append_to_job(
+                        clips_data["shorts"], transcript, input_video, duration)
+                except Exception as exc:
+                    print(f"   Superchat pass skipped ({exc}).")
+
             # Save metadata. Silent videos have no transcript → no subtitles,
             # which is correct (there's no speech to caption).
             clips_data['transcript'] = transcript or {"language": "none", "segments": []}
@@ -2793,6 +2900,12 @@ if __name__ == '__main__':
                                           subtitle_band=source_subtitle_band)
                     if success:
                         print(f"   🎞️ Clip {i+1} framed")
+                        # The temp cut is still the native frame. The finally
+                        # below deletes it, so the 16:9 copy has to happen now.
+                        if also_landscape(output_format):
+                            write_landscape_copy(
+                                clip_temp_path, clip_final_path, transcript,
+                                start, end, clip)
                     deliver_path = clip_final_path
                     # Which stretches were stacked (SPLIT): captions go on the
                     # seam there, and /api/subtitle needs it again later.
@@ -2883,7 +2996,8 @@ if __name__ == '__main__':
 
             # Persist per-clip render results added by the workers (auto_hook)
             # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c or 'hook_grounding' in c for c in shorts):
+            if any('auto_hook' in c or 'hook_grounding' in c or c.get('landscape_file')
+                   for c in shorts):
                 # Atomic: the dashboard is already reading this file for the
                 # clips announced above (CLIP_READY).
                 write_json_atomic(metadata_file, clips_data, indent=2)

@@ -1,0 +1,8 @@
+hunks: 1
+==== H0 line 984 ====
+HEAD:
+    const DEEP_LINK_TABS = ['autopilot', 'history', 'settings', 'thumbnails', 'dashboard', 'saasshorts'];
+
+THEIRS:
+    const DEEP_LINK_TABS = ['autopilot', 'history', 'jobs', 'animated', 'settings', 'thumbnails', 'dashboard'];
+

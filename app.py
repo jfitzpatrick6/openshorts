@@ -29,6 +29,8 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
+import local_media
+import selfhost_library
 import recut
 import layout_ranges
 import watermarked
@@ -46,7 +48,32 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Configuration
 # Default to 1 if not set, but user can set higher for powerful servers
 MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
-MAX_FILE_SIZE_MB = 2048  # 2GB limit
+# Per uploaded file, in megabytes. 0 removes the ceiling. UPLOADS_MAX_GB and
+# OUTPUT_MAX_GB still bound the directories. A local_path is not an upload
+# and is not measured against this.
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", "0"))
+# Directory the process may read when a job names local_path. Empty disables
+# that field. The path has to be visible inside this process (a bind mount).
+LOCAL_MEDIA_ROOT = os.environ.get("LOCAL_MEDIA_ROOT", "").strip()
+# Finished clips copied out of the job directory. Empty hides that list.
+# RETAINED_DAYS is only the label for how long those copies are kept.
+RETAINED_CLIPS_ROOT = os.environ.get("RETAINED_CLIPS_ROOT", "").strip()
+# Stick animations of kept clips, rendered by stickpass on the host (read-only).
+STICKS_ROOT = os.environ.get("STICKS_ROOT", "").strip()
+try:
+    RETAINED_DAYS = int(os.environ.get("RETAINED_DAYS", "30"))
+except ValueError:
+    RETAINED_DAYS = 30
+
+
+def _over_upload_limit(size: int) -> bool:
+    """True when a streamed upload has passed the per-file ceiling.
+
+    A ceiling of 0 never trips. Callers still write the body in chunks.
+    """
+    if MAX_FILE_SIZE_MB <= 0:
+        return False
+    return size > MAX_FILE_SIZE_MB * 1024 * 1024
 
 # How TikTok receives our uploads. MEDIA_UPLOAD lands the video in the user's
 # TikTok drafts so they finish the post inside TikTok's own editor; DIRECT_POST
@@ -1011,8 +1038,23 @@ def _clips_actually_rendered(job_id, output_dir, base_name, clips):
                   f"({clip_filename}) — dropping it from the result.")
             continue
         clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+        _attach_landscape_url(job_id, output_dir, clip)
         kept.append(clip)
     return kept, len(clips) - len(kept)
+
+
+def _attach_landscape_url(job_id, output_dir, clip):
+    """Point landscape_url at the 16:9 file when that file is on disk."""
+    name = selfhost_library.served_landscape_name(clip)
+    if not name:
+        return
+    path = os.path.join(output_dir, name)
+    try:
+        present = os.path.getsize(path) > 0
+    except OSError:
+        present = False
+    if present:
+        clip["landscape_url"] = f"/videos/{job_id}/{name}"
 
 
 def _strip_watermark_copy(output_dir, filename):
@@ -1323,6 +1365,7 @@ def _recover_jobs_from_disk():
                     clip['video_url'] = (
                         f"/videos/{job_id}/"
                         f"{_canonical_clip_file(job_path, base_name, i)}")
+                _attach_landscape_url(job_id, job_path, clip)
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
@@ -3179,6 +3222,7 @@ async def run_job(job_id, job_data):
                              clip_path = os.path.join(output_dir, clip_filename)
                              if os.path.exists(clip_path) and os.path.getsize(clip_path) > 0:
                                  clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
+                                 _attach_landscape_url(job_id, output_dir, clip)
                                  ready_clips.append(clip)
                         
                         if ready_clips:
@@ -3270,6 +3314,9 @@ async def get_config():
         # Self-host only: tells the dashboard the Gemini key is optional
         # because the moment picker runs on an OpenAI-compatible server.
         "localLlm": None if BILLING_ENABLED else llm_backend.describe(),
+        # Self-host builds that can render a 16:9 twin of each clip. The clip
+        # loop waits for this before submitting the next episode.
+        "alsoLandscape": not BILLING_ENABLED,
     }
 
 async def _probe_youtube_quality(url: str) -> dict:
@@ -3459,12 +3506,11 @@ async def put_upload(upload_id: str, request: Request):
     if not slot or time.time() - slot["created"] > UPLOAD_TTL_SECONDS:
         pending_uploads.pop(upload_id, None)
         raise HTTPException(status_code=404, detail="Unknown or expired upload_id")
-    limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
     size = 0
     with open(slot["path"], "wb") as out:
         async for chunk in request.stream():
             size += len(chunk)
-            if size > limit_bytes:
+            if _over_upload_limit(size):
                 out.close()
                 os.remove(slot["path"])
                 raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
@@ -3622,9 +3668,11 @@ async def process_endpoint(
     thumbnail_session_id: Optional[str] = Form(None),
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
+    local_path: Optional[str] = Form(None),
     max_minutes: Optional[str] = Form(None),
     source_start: Optional[str] = Form(None),
     source_end: Optional[str] = Form(None),
+    also_landscape: Optional[str] = Form(None),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -3656,9 +3704,11 @@ async def process_endpoint(
         thumbnail_session_id = body.get("thumbnail_session_id")
         captions = body.get("captions")
         upload_id = body.get("upload_id")
+        local_path = body.get("local_path")
         max_minutes = body.get("max_minutes")
         source_start = body.get("source_start")
         source_end = body.get("source_end")
+        also_landscape = body.get("also_landscape")
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3669,6 +3719,21 @@ async def process_endpoint(
         layouts = [p for p in layouts.split(",") if p.strip()]
     elif not isinstance(layouts, list):
         layouts = []
+
+    # A path the process can already read. Reject it before any other source
+    # is consumed, so a mixed request does not take an upload slot.
+    if local_path and (url or file or thumbnail_session_id or upload_id):
+        raise HTTPException(
+            status_code=400,
+            detail="local_path cannot be combined with url, file, or upload_id")
+    # Keep the module name free. Assigning to local_media here would shadow
+    # the import, and the resolve call on the next line would see None.
+    resolved_media = None
+    if local_path and not url and not file and not thumbnail_session_id and not upload_id:
+        try:
+            resolved_media = local_media.resolve_local_media(local_path, LOCAL_MEDIA_ROOT)
+        except local_media.LocalMediaError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail)
 
     # Module handover (issue #68): reuse the Thumbnail Studio source video and
     # its transcript so publishing to YouTube can flow straight into clip
@@ -3688,8 +3753,8 @@ async def process_endpoint(
     if upload_id and not url and not file and not thumb_session:
         upload_slot = _take_pending_upload(upload_id, await _owner_id(request))
 
-    if not url and not file and not thumb_session and not upload_slot:
-        raise HTTPException(status_code=400, detail="Must provide URL, File or upload_id")
+    if not url and not file and not thumb_session and not upload_slot and not resolved_media:
+        raise HTTPException(status_code=400, detail="Must provide URL, File, upload_id, or local_path")
 
     # Completion callback: reject unsafe targets NOW (clear 400) — delivery
     # re-validates anyway, but failing at submit is the debuggable behavior.
@@ -3724,8 +3789,8 @@ async def process_endpoint(
         "ip": client_ip,
         "user_agent": user_agent,
         "timestamp": time.time(),
-        "source": ("thumbnail_session" if thumb_session else "upload_id" if upload_slot
-                   else "url" if url else "file"),
+        "source": ("local_path" if resolved_media else "thumbnail_session" if thumb_session
+                   else "upload_id" if upload_slot else "url" if url else "file"),
     }
 
     job_id = str(uuid.uuid4())
@@ -3809,6 +3874,13 @@ async def process_endpoint(
         env["AUTO_CAPTIONS"] = "0"
         print(f"[captions] job={job_id} auto-captions off")
 
+    # A second file per moment: the native frame, captioned, for landscape
+    # posts. Horizontal jobs already are that frame, so they skip it.
+    if (str(also_landscape).lower() in ("1", "true", "yes")
+            and output_format != "horizontal"):
+        env["ALSO_LANDSCAPE"] = "1"
+        print(f"[landscape] job={job_id} also 16:9")
+
     input_path = None
     if url:
         # Keep the downloaded source inside the job dir: the clip editor's
@@ -3849,6 +3921,17 @@ async def process_endpoint(
         os.replace(src, input_path)
         pending_uploads.pop(upload_id, None)
         cmd.extend(["-i", input_path])
+    elif resolved_media:
+        # Read the file where it already lives. A pointer in the job dir lets
+        # the clip editor find it. Retention deletes the pointer with the job
+        # and leaves the original in place.
+        src_duration = _media_duration_seconds(resolved_media)
+        if MIN_SOURCE_SECONDS > 0 and 0 < src_duration < MIN_SOURCE_SECONDS:
+            shutil.rmtree(job_output_dir, ignore_errors=True)
+            _reject_short_source(src_duration)
+        with open(os.path.join(job_output_dir, "source_path.txt"), "w") as pointer:
+            pointer.write(resolved_media)
+        cmd.extend(["-i", resolved_media])
     else:
         # Save uploaded file with size limit check.
         # basename() strips any path components from the client-supplied
@@ -3858,12 +3941,11 @@ async def process_endpoint(
 
         # Read file in chunks to check size
         size = 0
-        limit_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
 
         with open(input_path, "wb") as buffer:
             while content := await file.read(1024 * 1024): # Read 1MB chunks
                 size += len(content)
-                if size > limit_bytes:
+                if _over_upload_limit(size):
                     os.remove(input_path)
                     shutil.rmtree(job_output_dir)
                     raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
@@ -4073,13 +4155,145 @@ async def get_status(job_id: str, request: Request):
     }
 
 
+def _job_rows_for(owner):
+    """Jobs this caller may see. Self-host passes owner=None and sees them all."""
+    _recover_jobs_from_disk()
+    rows = []
+    for job_id, record in list(jobs.items()):
+        if not isinstance(record, dict):
+            continue
+        if owner is not None and str(record.get("user_id") or "") != str(owner):
+            continue
+        output_dir = record.get("output_dir") or os.path.join(OUTPUT_DIR, job_id)
+        try:
+            updated = os.path.getmtime(output_dir)
+        except OSError:
+            updated = None
+        rows.append(selfhost_library.summarize_job(job_id, record, output_dir, updated))
+    # A restart leaves the running job as a resume manifest until this
+    # instance picks it up. It is not in memory yet, and disk recovery
+    # skips manifests on purpose, so list it from the manifest.
+    seen = set(jobs)
+    try:
+        names = os.listdir(OUTPUT_DIR)
+    except OSError:
+        names = []
+    now = time.time()
+    for job_id in names:
+        if job_id in seen:
+            continue
+        manifest = _read_manifest(job_id)
+        if not manifest:
+            continue
+        if owner is not None and str(manifest.get("user_id") or "") != str(owner):
+            continue
+        output_dir = os.path.join(OUTPUT_DIR, job_id)
+        heartbeat = float(manifest.get("heartbeat") or 0)
+        record = {
+            "status": "processing" if heartbeat and now - heartbeat < HEARTBEAT_STALE_AFTER else "queued",
+            "logs": ["Waiting to continue on this server."],
+            "output_dir": output_dir,
+        }
+        try:
+            updated = os.path.getmtime(output_dir)
+        except OSError:
+            updated = None
+        rows.append(selfhost_library.summarize_job(job_id, record, output_dir, updated))
+    return selfhost_library.sort_jobs(rows)
+
+
+@app.get("/api/jobs")
+async def list_jobs(request: Request):
+    """Working and finished jobs still on this server.
+
+    Cloud accounts only see their own. Self-host has no accounts, so the
+    list is every job recovered from disk plus anything running now.
+    """
+    if BILLING_ENABLED:
+        owner = await _owner_id(request)
+        if owner is None:
+            raise HTTPException(status_code=401, detail="Sign in required")
+    else:
+        owner = None
+    return {"jobs": _job_rows_for(owner)}
+
+
+@app.get("/api/retained")
+async def list_retained_clips():
+    """Clips copied out of the job directory and kept on their own clock.
+
+    Off when RETAINED_CLIPS_ROOT is unset, and off entirely on the cloud
+    app, which keeps that library in the account instead of on disk.
+    """
+    if BILLING_ENABLED or not RETAINED_CLIPS_ROOT:
+        return {"enabled": False, "days": RETAINED_DAYS, "episodes": []}
+    return selfhost_library.list_retained(RETAINED_CLIPS_ROOT, RETAINED_DAYS, time.time())
+
+
+@app.get("/api/sticks")
+async def list_stick_clips():
+    """Stick animations of kept clips. Off when STICKS_ROOT is unset and on the cloud app."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        return {"enabled": False, "sticks": []}
+    return selfhost_library.list_sticks(STICKS_ROOT)
+
+
+@app.get("/api/sticks/{episode}/{name}")
+async def stick_clip_media(episode: str, name: str):
+    """Stream one stick animation. The path has to stay inside STICKS_ROOT."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        raise HTTPException(status_code=404, detail="Stick animations are not available")
+    try:
+        path = selfhost_library.stick_file(STICKS_ROOT, episode, name)
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=f"{name}_stick.mp4")
+
+
+@app.get("/api/sticks/{episode}/{name}/story")
+async def stick_story_media(episode: str, name: str):
+    """Stream the storyboarded version of one stick animation."""
+    if BILLING_ENABLED or not STICKS_ROOT:
+        raise HTTPException(status_code=404, detail="Stick animations are not available")
+    try:
+        path = selfhost_library.stick_file(STICKS_ROOT, episode, name, "story")
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=f"{name}_story.mp4")
+
+
+@app.get("/api/retained/{episode}/{filename}")
+async def retained_clip_media(episode: str, filename: str):
+    """Stream one kept mp4. The path has to stay inside RETAINED_CLIPS_ROOT."""
+    if BILLING_ENABLED or not RETAINED_CLIPS_ROOT:
+        raise HTTPException(status_code=404, detail="Kept clips are not available")
+    try:
+        path = selfhost_library.retained_file(RETAINED_CLIPS_ROOT, episode, filename)
+    except local_media.LocalMediaError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
+    return FileResponse(path, media_type="video/mp4", filename=filename)
+
+
 def _locate_source(job_id: str):
     """Find a job's source video on disk, or None.
 
-    Upload jobs keep it in uploads/{job_id}_*; URL jobs keep the download in
-    the job dir (--keep-original) under the name recorded as ``source_video``
-    in metadata.json. Either way it ages out with the normal retention caps.
+    A local_path job records the existing file in source_path.txt and does not
+    copy it. Upload jobs keep a copy in uploads/{job_id}_*. URL jobs keep the
+    download in the job dir (--keep-original) under the name recorded as
+    ``source_video`` in metadata.json. The pointer is checked against
+    LOCAL_MEDIA_ROOT again so a rewritten file cannot point at an arbitrary path.
     """
+    pointer = os.path.join(OUTPUT_DIR, job_id, "source_path.txt")
+    try:
+        with open(pointer) as handle:
+            recorded = handle.read().strip()
+    except OSError:
+        recorded = ""
+    if recorded:
+        try:
+            return local_media.resolve_local_media(recorded, LOCAL_MEDIA_ROOT)
+        except local_media.LocalMediaError:
+            return None
     matches = [
         f for f in glob.glob(os.path.join(UPLOAD_DIR, f"{glob.escape(job_id)}_*"))
         if not os.path.basename(f).startswith("thumb_")
@@ -4223,6 +4437,11 @@ async def download_all_clips(job_id: str, request: Request):
         path = os.path.join(output_dir, filename)
         if filename and os.path.exists(path):
             files.append((i, path))
+        wide = selfhost_library.served_landscape_name(clip)
+        if wide:
+            wide_path = os.path.join(output_dir, wide)
+            if os.path.exists(wide_path):
+                files.append((i, wide_path))
 
     if not files:
         raise HTTPException(status_code=404, detail="No clip files found for this job")
@@ -4372,6 +4591,7 @@ async def _restore_job_files(job_id: str, proj, user_id: str) -> bool:
                 clip['video_url'] = (
                     f"/videos/{job_id}/"
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
+            _attach_landscape_url(job_id, job_dir, clip)
         if any(watermarked.is_marked(c.get("server_file") or "")
                for c in (proj.state or {}).get("clips", [])):
             watermarked.mark_job(job_dir)
@@ -7572,7 +7792,19 @@ async def thumbnail_publish_status(publish_id: str, request: Request):
 #         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# Account erasure still walks this map. The UGC generator that filled it is gone.
+saas_jobs: Dict[str, Dict] = {}
+
+
+class SaaSAnalyzeRequest(BaseModel):
+    url: Optional[str] = None
+    description: Optional[str] = None  # Manual product/business description
+    num_scripts: int = 3
+    style: str = "ugc"
+    language: str = "en"
+    actor_gender: str = "female"
+
+
 # SaaSShorts: AI UGC Video Generator for SaaS Products
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -7589,15 +7821,6 @@ from saasshorts import (
 
 # State for SaaSShorts jobs (separate from video processing jobs)
 saas_jobs: Dict[str, Dict] = {}
-
-
-class SaaSAnalyzeRequest(BaseModel):
-    url: Optional[str] = None
-    description: Optional[str] = None  # Manual product/business description
-    num_scripts: int = 3
-    style: str = "ugc"
-    language: str = "en"
-    actor_gender: str = "female"
 
 
 @app.post("/api/saasshorts/analyze")

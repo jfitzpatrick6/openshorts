@@ -47,6 +47,7 @@ Ingest (yt-dlp or upload) → transcription (word timestamps) → scene detectio
 - Quota wall, free overflow, lifecycle emails, cancel flow, survey, GDPR erasure → `docs/architecture/billing-and-account.md`
 - Concurrency/VRAM, auto-retry, deploy handover and drain → `docs/architecture/jobs-and-deploys.md`
 - Download routing, yt-dlp clients, paid proxy ledger → `docs/architecture/proxy-routing.md`
+- Animated tab (stickpass) look: palette, type, characters, motion, storyboarding → `docs/animation-style-guide.md`
 
 ## Hard rules
 

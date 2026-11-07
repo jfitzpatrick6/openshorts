@@ -1,0 +1,99 @@
+5
+==== HUNK 0 line 3673 len 185 ====
+ <<<<<<< HEAD
+    source_start: Optional[str] = Form(None),
+    source_end: Optional[str] = Form(None),
+=======
+    also_landscape: Optional[str] = Form(None),
+>>>>>>> stickpass-animated
+==== HUNK 1 line 3712 len 191 ====
+ <<<<<<< HEAD
+        source_start = body.get("source_start")
+        source_end = body.get("source_end")
+=======
+        also_landscape = body.get("also_landscape")
+>>>>>>> stickpass-animated
+==== HUNK 2 line 7157 len 796 ====
+ <<<<<<< HEAD
+        url = None
+        video_path, source_minutes = await _save_thumbnail_upload(file, session_id)
+    else:
+        source_minutes, paid_allowed = await _probe_thumbnail_url(request, url, user)
+=======
+        safe_name = os.path.basename(file.filename or "upload") or "upload"
+        video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
+        size = 0
+        with open(video_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if _over_upload_limit(size):
+                    os.remove(video_path)
+                    raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                buffer.write(chunk)
+>>>>>>> stickpass-animated
+==== HUNK 3 line 7302 len 1204 ====
+ <<<<<<< HEAD
+            user = await _user_from_request(request) if BILLING_ENABLED else None
+            source_minutes, paid_allowed = await _probe_thumbnail_url(request, url, user)
+            download_url = url
+        if BILLING_ENABLED:
+            analyze_minutes += thumbnail_transcribe_minutes(source_minutes)
+=======
+            safe_name = os.path.basename(file.filename or "upload") or "upload"
+            video_path = os.path.join(UPLOAD_DIR, f"thumb_{session_id}_{safe_name}")
+            size = 0
+            with open(video_path, "wb") as buffer:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if _over_upload_limit(size):
+                        os.remove(video_path)
+                        raise HTTPException(status_code=413, detail=f"File too large. Max size {MAX_FILE_SIZE_MB}MB")
+                    buffer.write(chunk)
+
+    # Meter the managed Gemini analysis (no-op for self-host).
+    analyze_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(request, analyze_minutes, session_id, "thumbnail_analyze")
+>>>>>>> stickpass-animated
+==== HUNK 4 line 7833 len 34777 ====
+ <<<<<<< HEAD
+
+
+class SaaSAnalyzeRequest(BaseModel):
+    url: Optional[str] = None
+    description: Optional[str] = None  # Manual product/business description
+    num_scripts: int = 3
+    style: str = "ugc"
+    language: str = "en"
+    actor_gender: str = "female"
+
+
+@app.post("/api/saasshorts/analyze")
+async def saasshorts_analyze(
+    req: SaaSAnalyzeRequest,
+    request: Request,
+):
+    """Analyze a URL or manual description and generate video scripts."""
+    gemini_key = await resolve_gemini(request)
+    if not gemini_key:
+        raise gemini_missing_error()
+
+    if not req.url and not req.description:
+        raise HTTPException(status_code=400, detail="Provide a URL or a product description")
+    max_scripts = _cloud_cfg().SAAS_MAX_SCRIPTS
+    if not 1 <= int(req.num_scripts) <= max_scripts:
+        raise HTTPException(status_code=400,
+                            detail=f"num_scripts must be between 1 and {max_scripts}.")
+    _check_text_length(req.description, _cloud_cfg().SAAS_DESCRIPTION_MAX_CHARS, "description")
+
+    # Meter the managed Gemini research/analysis (no-op for self-host).
+    saas_minutes = _cloud_config.MANAGED_ANALYSIS_MINUTES if BILLING_ENABLED else 0
+    reservation_id = await reserve_managed_action(request, saas_minutes, "saasshorts", "saasshorts_analyze")
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        def run_analysis():
+            web_research = None
+
+            if req.url and req.url.strip():
+                # URL provided: full scr

@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Download, Loader2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { getApiUrl } from '../config';
+import LazyVideo from './LazyVideo';
 
 function fmtSize(bytes) {
   if (!bytes) return '';
@@ -83,7 +84,7 @@ function StickCard({ stick }) {
   return (
     <div className="card overflow-hidden flex flex-col">
       <div className="relative aspect-[9/16] bg-black">
-        <video key={url} src={url} controls playsInline preload="metadata" className="w-full h-full object-contain" />
+        <LazyVideo src={url} boxClass="absolute inset-0" />
         {!story && stick.status === 'fallback' && (
           <span
             className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full text-brass"
@@ -132,11 +133,20 @@ function StickCard({ stick }) {
 export default function AnimatedTab() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  // the 15 s poll must not re-render the card grid when nothing changed:
+  // re-rendering remounts nothing but re-negotiates every mounted video
+  const lastSig = useRef('');
 
   useEffect(() => {
     let cancelled = false;
     const load = () => apiJson('/api/sticks')
-      .then((body) => { if (!cancelled) { setData(body); setError(''); } })
+      .then((body) => {
+        if (cancelled) return;
+        const sig = JSON.stringify(body);
+        if (sig === lastSig.current) return;
+        lastSig.current = sig;
+        setData(body); setError('');
+      })
       .catch(() => { if (!cancelled) setError('Could not load animations.'); });
     load();
     const timer = setInterval(load, 15000);

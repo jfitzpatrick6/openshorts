@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Film, FolderOpen, Loader2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 import { getApiUrl } from '../config';
+import LazyVideo from './LazyVideo';
 
 const WORKING = new Set(['processing', 'queued']);
 
@@ -74,6 +75,9 @@ export default function JobsTab({ onOpenJob }) {
   const scoreCache = useRef({});
   const [scoreTick, setScoreTick] = useState(0);
   const mounted = useRef(true);
+  // signature of the last poll payload: an unchanged server must not re-render
+  // the clip grid (re-rendering re-negotiates every mounted video)
+  const lastSig = useRef('');
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +87,9 @@ export default function JobsTab({ onOpenJob }) {
       Promise.all([apiJson('/api/jobs'), apiJson('/api/retained'), stickList])
         .then(([jobBody, keptBody, stickBody]) => {
           if (cancelled) return;
+          const sig = JSON.stringify([jobBody.jobs || [], keptBody, stickBody]);
+          if (sig === lastSig.current) return;
+          lastSig.current = sig;
           setJobs(jobBody.jobs || []);
           setKept(keptBody);
           setSticks(stickBody);
@@ -228,12 +235,7 @@ export default function JobsTab({ onOpenJob }) {
                   return (
                     <div key={clip.url} className="card overflow-hidden">
                       <div className={`relative ${clip.shape === '16:9' ? 'aspect-video' : 'aspect-[9/16]'} bg-black`}>
-                        <video
-                          src={getApiUrl(clip.url)}
-                          controls
-                          preload="metadata"
-                          className="w-full h-full object-contain"
-                        />
+                        <LazyVideo src={getApiUrl(clip.url)} boxClass="absolute inset-0" />
                         {Number.isFinite(score) && (
                           <span
                             className="pointer-events-none absolute top-2 left-2 bg-black/70 font-mono text-micro uppercase px-2 py-1 rounded-full"
